@@ -244,6 +244,19 @@ v0.1.0（首版）：
    （`migration-v0.9`）。行为采样只能定时轮询只读快照。
 3. **timer 每拍 `asyncio.run(fn())`（新 event loop）且无 watchdog**：tick 内不得使用在其它拍/`startup`
    里创建的 loop 绑定对象；异常只记日志不停表，需自己兜。
+   - **已核实 = 真·独立线程**（v0.4.x 复核，`plugin/core/host.py:1217-1250`）：每个
+     `auto_start=True` 的 `@timer_interval` 由 `threading.Thread(daemon=True)` 起**专属线程**，
+     循环体是 `asyncio.run(fn())` + `stop_event.wait(interval)`（`:1218-1230`）；
+     而入口 / 工具 / 消息走**另一条** `asyncio.run(_async_command_loop())`（`:1788`，主线程）。
+   - ⇒ `on_tick`（timer 线程）与 `our_life_judge` 等入口/工具（command loop 线程）是**真并发**，
+     不是同一事件循环里的交替。两者共享同一份 `ShardState` 实例
+     （`services/state.py:512-520` 的 `load` 返回缓存对象、`:522-524` 的 `save` 原地更新缓存），
+     因此在 `await` 点上的读-改-写**理论上有交错窗口**。
+   - 当前结论（不夸大）：`judgment_*` 轴的唯一写入方就是 `our_life_judge` 自己
+     （`__init__.py:1127-1147`，入口只在 `judge` 里调），所以没有第二个写者去丢它的更新；
+     `daily_allowance_granted` / 里程碑同样只有 `_settle` 写。**未观察到真实损失，暂不加锁**，
+     但这条窗口是**没有测试门覆盖**的——新增任何"由入口/工具写、由 tick 消费"的双写字段时，
+     必须先回头评估这里（或改为单一队列/加 `threading.Lock`）。
 4. **`[plugin.store].enabled = false` 时 store 静默失效**：`set` 返回 `Ok` 却不落盘、`get` 返回默认值。
 5. **`push_message` 的 `submitted=True` 不等于宿主已消费**：启动钩子期推送会落在订阅窗口之前被静默丢弃。
    注入只在 tick / 入口 / 工具里发，不在 `startup` 里发。
@@ -254,14 +267,22 @@ v0.1.0（首版）：
 9. **隐私**：注入正文含用户互动信息，只进总线不进日志正文；涉及原文一律不上 `logger`。
 10. **`@llm_tool` 名称**必须匹配 `^[A-Za-z0-9_.\-]{1,64}$`，且工具注册表在 `main_server` 内存里，
     宿主重启即丢、无自动重注册——首版不额外做重注册心跳（记为待办），并在 README 说明。
-11. **挂载态目录名必须等于 entry 的包名**（宿主源码核实，`plugin/core/entry_points.py`
-    的 `describe_plugin_entry_directory_mismatch` + `plugin/core/host.py:467` 的
-    `config_path.resolve().parent.name`）：`plugin.plugins.our_life` 只能配真实名叫 `our_life`
-    的目录，否则 400 `PLUGIN_ENTRY_DIRECTORY_MISMATCH` 且插件停在 failed。
-    **软链接 / junction 也救不回来**（`resolve()` 会把链接解开、目录名变回真实名）。
-    所以开发工作区叫 `n.e.k.o_plugin_our_life`（合法 Git 仓名，不是合法 Python 包名），
-    要挂进宿主只能**复制**：`tools/release_gate.py` 的 release / hosted-tsx 两门就是
-    真复制进 `<宿主>/plugin/plugins/our_life/`（探针副本，用后即删）。
+11. **挂载态目录名必须等于 entry 的包名**（宿主源码核实）。两段链：
+    - `plugin/server/application/plugins/lifecycle_service.py:1078-1091` 先调
+      `normalize_plugin_entry_point(...)`，再调 `describe_plugin_entry_directory_mismatch(...)`，
+      不一致即 `code="PLUGIN_ENTRY_DIRECTORY_MISMATCH"` / `status_code=400` / 插件停在 failed。
+    - 判定本体在 `plugin/core/entry_points.py:47-74`：取 entry 模块路径的**第 2 段**
+      （`plugins.our_life` → `our_life`）与 `config_path.parent.name` 硬比对。
+    - **归一化会把 entry 改写**（`entry_points.py:15-44`）：只能 entry 对应**在宿主仓内**的插件，
+      canonical 写法 `plugin.plugins.our_life:OurLifePlugin` 原样保留；**用户安装态**会被重写成
+      `plugins.our_life:OurLifePlugin`。所以两种形态下目录名都必须真叫 `our_life`。
+    - `n.e.k.o_plugin_our_life`（合法 Git 仓名，不是合法 Python 包名）因此**永远挂不上**。
+      **软链接 / junction 也救不回来**（`resolve()` 会把链接解开、目录名变回真实名）。
+      唯一挂载方式就是**复制**：`tools/release_gate.py` 的 release / hosted-tsx 两门就是
+      真复制进 `<宿主>/plugin/plugins/our_life/`（探针副本，用后即删）。
+    - 另注（易混）：目录名与 `[plugin].id` 不一致**只是 warning**
+      （`plugin/config/plugin_toml_semantics.py:64-76`，`PLUGIN_DIRECTORY_ID_MISMATCH`），
+      与上面这条 entry 包名不匹配的**硬 400** 是两回事，别把两者当成同一条规则。
 12. **Hosted TSX 检查要求被检路径在宿主仓内**（`frontend/plugin-manager/scripts/check-hosted-tsx.mjs`
     的 `assertPathInsideRepo` 用 `realpathSync` 比对），所以它**只能**对宿主仓内的副本跑，
     对仓外工作区路径会直接报 "Plugin search target outside repo root"。
