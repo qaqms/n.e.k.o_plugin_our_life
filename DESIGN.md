@@ -35,7 +35,8 @@
   - lifecycle：startup 装配、shutdown 落盘
   - timer：周期采样行为（只读总线）+ 节律折算 + 自动进食 + 经济结算 + 注入判定
   - message injection：`push_message(visibility=[], ai_behavior="read"|"respond", coalesce_key=...)`
-  - UI：Hosted TSX panel（五项数值 + 走势字符图 + 口粮顾问 + 商店 + 背包 + 节律/纪念日 + 开关/纠偏）
+  - UI：Hosted TSX panel（v0.4.1 起为「顶部常驻状态带 + Tabs 四页」：
+    总览(走势/节律) / 过日子(顾问/商店/背包) / 她的世界(感受/事件) / 管理(纠偏/注入史/配置)）
   - store：`PluginStore` 持久化（必须 `[plugin.store].enabled = true`，否则静默不落盘）
   - i18n：zh-CN / en（其余语言后续补齐，见"路线图"）
 - inferred architecture:
@@ -139,6 +140,16 @@ v0.1.0（首版）：
 5. LLM 工具两个：她查询自身状态、她主动索取陪伴（带冷却）
 6. fail-closed 总开关 `[our_life].enabled = false`（默认关：未打开前不注入、不结算、不推送）
 7. 中英 i18n、`tests/` 数值门 + i18n 契约门、`tools/release_gate.py` 五门
+
+## v0.4.1 Scope（面板分区重构：状态带 + 标签页，第九轮）
+
+1. **顶部常驻状态带**：五轴 Progress + 今日事实徽章（第几天 / 连续天数 / 时段 / 睡眠 / 距边界 /
+   危机轴）+ 总开关与刷新。告警（冻结 / 错误码 / 口粮告急）仍在带上方，任何位置都看得到她的状态。
+2. **Tabs 四页**（kit 的 `Tabs`，激活态由宿主 `useLocalState("tabs:<id>")` 持久化，刷新不丢位置）：
+   总览（走势 + 相处节律）/ 过日子（口粮顾问 + 商店×背包双栏）/ 她的世界（感受 + 经历）/
+   管理（纠偏 + 近期注入 + 配置）。独立「总开关」卡并入状态带，不再单列。
+3. **纯布局轮**：Python 侧零改动（context / action / 码 / 台账都不动），只新增面板文案键
+   （`panel.band.*` / `panel.tab.*`，双语纯插入保 CRLF）与一条文本级布局门。
 
 ## v0.4.0 Scope（「阶段性事件与面板叙事」主线，第八轮）
 

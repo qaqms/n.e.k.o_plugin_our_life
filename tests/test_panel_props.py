@@ -92,6 +92,18 @@ def test_panel_does_not_use_the_global_facade_bare() -> None:
     assert "props.api.call(" in source, "expected the panel to drive actions through props.api"
 
 
+def test_panel_uses_tabbed_layout_with_a_persistent_status_band() -> None:
+    """v0.4.1 布局门：状态带常驻 + Tabs 四页，防止改版被无意打回单列长滚。"""
+    source = _panel_source()
+    imported = _imported_components(source)
+    assert "Tabs" in imported and "StatusBadge" in imported, "panel must keep the tabbed layout"
+    for tab_key in ("panel.tab.overview", "panel.tab.life", "panel.tab.her", "panel.tab.admin"):
+        assert f't("{tab_key}")' in source, f"missing tab entry {tab_key}"
+    for band_key in ("panel.band.day", "panel.band.streak", "panel.band.crisis"):
+        assert f't("{band_key}"' in source, f"missing status band key {band_key}"
+    assert '<Tabs id="our_life.main"' in source, "Tabs must keep the persisted id"
+
+
 def test_panel_has_a_single_default_function_export() -> None:
     source = _panel_source()
     # 只数真正的导出语句（注释里也会出现这个词，见本模块 docstring 的说明）

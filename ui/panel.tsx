@@ -7,6 +7,13 @@
 // - 只允许相对导入与 `@neko/plugin-ui`；必须 `export default` 一个函数组件。
 // - 检查器是**文本级**规则：文件里出现"全局门面对象"的裸标识符形态就会被拒收，
 //   所以一律写完整的 `props.api` 成员访问（连注释也不例外）。
+//
+// 布局（v0.4.1 重构，替代旧的"一条道滑到底"）：
+// - **顶部状态带**：五轴进度条 + 今日事实徽章（第几天 / 连续天数 / 时段 / 睡眠 / 危机）+ 总开关，
+//   滚到任何角落她当前的状态都一眼可见；
+// - **Tabs 四页**：总览（走势 + 相处节律）/ 过日子（口粮顾问 + 商店 + 背包）/
+//   她的世界（她自己的感受 + 她经历过什么）/ 管理（纠偏 + 近期注入 + 配置）。
+//   Tab 激活态由 kit 的 `useLocalState("tabs:<id>")` 持久化，刷新上下文不丢位置。
 import {
   ActionButton,
   Alert,
@@ -23,8 +30,9 @@ import {
   Progress,
   Select,
   Stack,
-  StatCard,
+  StatusBadge,
   Switch,
+  Tabs,
   Text,
   useConfirm,
   useLocalState,
@@ -231,6 +239,7 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   const tiers = snapshot?.tiers ?? {}
   const inventory = snapshot?.inventory ?? {}
   const catalog = state?.shop ?? []
+  const sleeping = runtime.sleeping ?? snapshot?.sleeping ?? false
 
   const actionOf = (id: string): HostedAction | undefined =>
     actions.find((action) => action.id === id || action.entry_id === id)
@@ -327,6 +336,10 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   const trend = state?.trend ?? []
   const trendPoints = (trend.length > 0 ? trend : injections.filter((row) => row.stats)).slice(-12)
 
+  const crisisAxes = (runtime.crisis_axes ?? [])
+    .map((axis) => t(`panel.stat.${axis}`, { defaultValue: axis }))
+    .join(" · ")
+
   const effectText = (entry: ShopEntry): string =>
     (entry.effects ?? [])
       .map(([name, delta]) => `${t(`panel.stat.${name}`, { defaultValue: name })} ${delta > 0 ? "+" : ""}${delta}`)
@@ -338,6 +351,374 @@ export default function Panel(props: PluginSurfaceProps<State>) {
       ? t("panel.advisor.stock", { units: advisor.stock_meals ?? 0 })
       : t("panel.advisor.days", { days: daysRemaining })
 
+  const tierOf = (key: string): string =>
+    t(`panel.tier.${key}.${tiers[key] ?? "unknown"}`, { defaultValue: tiers[key] ?? "-" })
+
+  // ---- 标签页内容 ----------------------------------------------------------
+  // 每个 tab 的 content 在渲染期一并构造：kit 的 Tabs 只渲染激活页的 content，
+  // 构造本身是纯读快照的 JSX，没有副作用。
+
+  const overviewTab = (
+    <Stack gap={16}>
+      <Card title={t("panel.section.trend")}>
+        {trendPoints.length > 1 ? (
+          <Stack gap={8}>
+            {STAT_KEYS.map((key) => (
+              <Inline key={key} gap={12} align="center">
+                <Text>{`${t(`panel.stat.${key}`)}`}</Text>
+                <Text>{sparkline(trendPoints.map((row) => Number(row.stats?.[key] ?? 0)))}</Text>
+                <Text>{`${Number(trendPoints[trendPoints.length - 1]?.stats?.[key] ?? 0).toFixed(0)}`}</Text>
+              </Inline>
+            ))}
+          </Stack>
+        ) : (
+          <EmptyState title={t("panel.section.trend")} description={t("panel.trendHint")} />
+        )}
+      </Card>
+
+      <Card title={t("panel.section.rhythm")}>
+        <Stack gap={12}>
+          <KeyValue
+            items={[
+              { key: "lanlan", label: t("panel.field.lanlan"), value: snapshot?.lanlan ?? "-" },
+              {
+                key: "phase",
+                label: t("panel.field.phase"),
+                value: t(`panel.phase.${runtime.phase ?? "noon"}`, { defaultValue: runtime.phase ?? "-" }),
+              },
+              {
+                key: "boundary",
+                label: sleeping ? t("panel.field.boundaryWake") : t("panel.field.boundarySleep"),
+                value: String(runtime.minutes_to_boundary ?? 0),
+              },
+              { key: "dayNumber", label: t("panel.field.dayNumber"), value: String(runtime.day_number ?? 0) },
+              { key: "streak", label: t("panel.field.streak"), value: String(snapshot?.streak_days ?? 0) },
+              {
+                key: "anniversary",
+                label: t("panel.field.anniversary"),
+                value: runtime.anniversary
+                  ? runtime.anniversary.kind === "yearly"
+                    ? t("panel.anniversary.yearly", { years: runtime.anniversary.years ?? 1 })
+                    : t("panel.anniversary.milestone", { day: runtime.anniversary.day_number ?? 0 })
+                  : "-",
+              },
+              {
+                key: "last",
+                label: t("panel.field.lastTouch"),
+                value: formatTime(snapshot?.last_touch_at, t("panel.never")),
+              },
+              { key: "gap", label: t("panel.field.gap"), value: formatGap(snapshot?.gap_hours, t) },
+              {
+                key: "injects",
+                label: t("panel.field.inject24h"),
+                value: String(snapshot?.inject_count_24h ?? 0),
+              },
+            ]}
+          />
+          {activeHours.length > 0 ? (
+            <Inline gap={8} wrap>
+              {activeHours.map((item) => (
+                <Text key={item.hour}>{`${String(item.hour).padStart(2, "0")}:00 ×${item.count}`}</Text>
+              ))}
+            </Inline>
+          ) : (
+            <Text>{t("panel.hoursHint")}</Text>
+          )}
+        </Stack>
+      </Card>
+    </Stack>
+  )
+
+  const lifeTab = (
+    <Stack gap={16}>
+      <Card title={t("panel.section.advisor")}>
+        <Stack gap={12}>
+          <KeyValue
+            items={[
+              { key: "sodas", label: t("panel.field.sodas"), value: String(snapshot?.sodas ?? 0) },
+              { key: "spent", label: t("panel.field.dailySpent"), value: String(snapshot?.daily_spent ?? 0) },
+              {
+                key: "need",
+                label: t("panel.field.economy"),
+                value: t("panel.advisor.need", { meals: advisor.meals_per_day ?? 0 }),
+              },
+              { key: "stock", label: t("panel.field.staple"), value: advisorLine },
+              { key: "mealsToday", label: t("panel.field.mealsToday"), value: String(snapshot?.meals_today ?? 0) },
+              { key: "mealsTotal", label: t("panel.field.mealsTotal"), value: String(snapshot?.meals_total ?? 0) },
+              { key: "lastMeal", label: t("panel.field.lastMeal"), value: formatTime(snapshot?.last_meal_at, t("panel.never")) },
+            ]}
+          />
+          <Text>
+            {t("panel.advisor.hint", {
+              meals: advisor.meals_per_day ?? 0,
+              horizon: advisor.horizon_days ?? 0,
+              units: (advisor.stock_meals ?? 0) + (advisor.suggested_purchase ?? 0),
+            })}
+          </Text>
+          {advisor.empty ? <Alert tone="danger" message={t("panel.advisor.empty")} /> : null}
+        </Stack>
+      </Card>
+
+      <Grid cols={2} gap={16}>
+        <Card title={t("panel.section.shop")}>
+          <Stack gap={12}>
+            <Grid cols={2} gap={12}>
+              {catalog.map((entry) => (
+                <Card key={String(entry.id)} title={t(`panel.item.${entry.id ?? "unknown"}`, { defaultValue: entry.id ?? "-" })}>
+                  <Stack gap={8}>
+                    <Text>{`${t("panel.field.sodas")} ${entry.cost ?? "-"}`}</Text>
+                    <Text>{t("panel.shopEffects", { effects: effectText(entry) })}</Text>
+                    <Text>
+                      {(inventory[String(entry.id)] ?? 0) > 0
+                        ? t("panel.shopOwned", { count: inventory[String(entry.id)] ?? 0 })
+                        : t("panel.shopOutOfStock")}
+                    </Text>
+                    <Button
+                      tone="success"
+                      disabled={!enabled}
+                      onClick={async () => {
+                        const result = await run("shop", { item: entry.id, quantity: 1 })
+                        if (dismissResult(result)) return
+                        if (result?.note === "shop_purchased") toast.success(t("panel.msg.shopPurchased"))
+                      }}
+                    >
+                      {t("actions.shop.label")}
+                    </Button>
+                  </Stack>
+                </Card>
+              ))}
+            </Grid>
+            <Field label={t("fields.item")}>
+              <Select value={buyItem} options={catalogItems} onChange={(next: any) => setBuyItem(String(next))} />
+            </Field>
+            <Field label={t("fields.quantity")}>
+              <NumberInput
+                value={buyQuantity}
+                min={1}
+                max={99}
+                step={1}
+                onChange={(next: number | string) => setBuyQuantity(next === "" ? "" : Number(next))}
+              />
+            </Field>
+            <Inline gap={12}>
+              <Button tone="success" disabled={!enabled} onClick={buy}>
+                {t("actions.shop.label")}
+              </Button>
+            </Inline>
+          </Stack>
+        </Card>
+
+        <Card title={t("panel.section.bag")}>
+          <Stack gap={12}>
+            {affordableItems.length > 0 ? (
+              <KeyValue
+                items={affordableItems.map((entry) => ({
+                  key: entry.value,
+                  label: entry.label,
+                  value: String(inventory[entry.value] ?? 0),
+                }))}
+              />
+            ) : (
+              <EmptyState title={t("panel.section.bag")} description={t("panel.advisor.empty")} />
+            )}
+            {affordableItems.length > 0 ? (
+              <>
+                <Field label={t("fields.item")}>
+                  <Select
+                    value={careItem}
+                    options={affordableItems}
+                    onChange={(next: any) => setCareItem(String(next))}
+                  />
+                </Field>
+                <Inline gap={12}>
+                  <Button tone="primary" disabled={!enabled} onClick={care}>
+                    {t("actions.feed.label")}
+                  </Button>
+                </Inline>
+              </>
+            ) : null}
+          </Stack>
+        </Card>
+      </Grid>
+    </Stack>
+  )
+
+  const herTab = (
+    <Stack gap={16}>
+      <Card title={t("panel.section.feedback")}>
+        <Stack gap={12}>
+          <KeyValue
+            items={[
+              {
+                key: "count",
+                label: t("panel.field.feedbackCount"),
+                value: String(feedback.count_today ?? 0),
+              },
+              {
+                key: "quota",
+                label: t("panel.field.feedbackQuota"),
+                value: `${(feedback.remaining_add ?? 0).toFixed(1)} / ${(
+                  feedback.remaining_subtract ?? 0
+                ).toFixed(1)}`,
+              },
+              {
+                key: "last",
+                label: t("panel.field.feedbackLast"),
+                value: formatTime(feedback.last_judgment_at, t("panel.never")),
+              },
+            ]}
+          />
+          {judgmentHistory.length > 0 ? (
+            <DataTable
+              rowKey="at"
+              data={judgmentHistory}
+              emptyText={t("panel.never")}
+              columns={[
+                {
+                  key: "at",
+                  label: t("panel.field.time"),
+                  render: (row: JudgmentRecord) => formatTime(row.at, "-"),
+                },
+                {
+                  key: "label",
+                  label: t("panel.field.judgment"),
+                  render: (row: JudgmentRecord) =>
+                    t(`panel.judgment.${row.label ?? "neutral"}`, {
+                      defaultValue: row.label ?? "-",
+                    }),
+                },
+              ]}
+            />
+          ) : (
+            <Text>{t("panel.feedbackHint")}</Text>
+          )}
+        </Stack>
+      </Card>
+
+      <Card title={t("panel.section.events")}>
+        {eventHistory.length > 0 ? (
+          <Stack gap={12}>
+            <DataTable
+              rowKey="at"
+              data={eventHistory}
+              emptyText={t("panel.noEvents")}
+              columns={[
+                {
+                  key: "at",
+                  label: t("panel.field.time"),
+                  render: (row: EventRecord) => formatTime(row.at, "-"),
+                },
+                {
+                  key: "key",
+                  label: t("panel.field.event"),
+                  render: (row: EventRecord) =>
+                    t(`panel.event.${row.key ?? "unknown"}`, { defaultValue: row.key ?? "-" }),
+                },
+                {
+                  key: "stat",
+                  label: t("panel.field.stat"),
+                  render: (row: EventRecord) =>
+                    t(`panel.stat.${row.stat ?? "unknown"}`, { defaultValue: row.stat ?? "-" }),
+                },
+              ]}
+            />
+            <Text>{t("panel.eventsHint")}</Text>
+          </Stack>
+        ) : (
+          <EmptyState title={t("panel.noEvents")} description={t("panel.noEventsHint")} />
+        )}
+      </Card>
+    </Stack>
+  )
+
+  const adminTab = (
+    <Stack gap={16}>
+      <Card title={t("panel.section.tune")}>
+        <Stack gap={12}>
+          <Field label={t("panel.field.stat")} help={t("panel.tuneHelp")}>
+            <Select value={tuneStat} options={statOptions} onChange={(next: any) => setTuneStat(String(next))} />
+          </Field>
+          <Field label={t("panel.field.value")}>
+            <NumberInput
+              value={tuneValue}
+              min={0}
+              max={100}
+              step={1}
+              onChange={(next: number | string) => setTuneValue(next === "" ? "" : Number(next))}
+            />
+          </Field>
+          <Inline gap={12}>
+            <Button tone="primary" disabled={!enabled} onClick={applyTune}>
+              {t("actions.tune.label")}
+            </Button>
+            <Button tone="danger" onClick={resetStats}>
+              {t("actions.reset.label")}
+            </Button>
+          </Inline>
+        </Stack>
+      </Card>
+
+      <Card title={t("panel.section.history")}>
+        {injections.length > 0 ? (
+          <DataTable
+            rowKey="at"
+            data={injections}
+            emptyText={t("panel.noInjections")}
+            columns={[
+              {
+                key: "at",
+                label: t("panel.field.time"),
+                render: (row: InjectionRecord) => formatTime(row.at, "-"),
+              },
+              {
+                key: "trigger",
+                label: t("panel.field.trigger"),
+                render: (row: InjectionRecord) =>
+                  t(`panel.trigger.${row.trigger ?? "unknown"}`, { defaultValue: row.trigger ?? "-" }),
+              },
+              { key: "summary", label: t("panel.field.summary") },
+            ]}
+          />
+        ) : (
+          <EmptyState title={t("panel.noInjections")} description={t("panel.noInjectionsHint")} />
+        )}
+      </Card>
+
+      <Card title={t("panel.section.config")}>
+        <KeyValue
+          items={[
+            { key: "tick", label: t("panel.field.tick"), value: String(config.tick_seconds ?? "-") },
+            {
+              key: "sleep",
+              label: t("panel.field.sleepWindow"),
+              value: `${config.sleep_start_hour ?? "-"}:00 → ${config.sleep_end_hour ?? "-"}:00`,
+            },
+            { key: "moodTau", label: t("panel.field.moodTau"), value: String(config.mood_tau_hours ?? "-") },
+            { key: "healthTau", label: t("panel.field.healthTau"), value: String(config.health_tau_hours ?? "-") },
+            { key: "affTau", label: t("panel.field.affTau"), value: String(config.affection_tau_days ?? "-") },
+            { key: "grace", label: t("panel.field.grace"), value: String(config.grace_hours ?? "-") },
+            {
+              key: "rate",
+              label: t("panel.field.rate"),
+              value: t("panel.rateValue", {
+                interval: Math.round(Number(config.min_interval_sec ?? 0) / 60),
+                max: config.max_per_hour ?? "-",
+              }),
+            },
+            { key: "store", label: t("panel.field.store"), value: state?.store_available ? "OK" : "-" },
+          ]}
+        />
+      </Card>
+    </Stack>
+  )
+
+  const tabItems = [
+    { id: "overview", label: t("panel.tab.overview"), content: overviewTab },
+    { id: "life", label: t("panel.tab.life"), content: lifeTab },
+    { id: "her", label: t("panel.tab.her"), content: herTab },
+    { id: "admin", label: t("panel.tab.admin"), content: adminTab },
+  ]
+
   return (
     <Page title={t("panel.title")} subtitle={t("panel.subtitle")}>
       <Stack gap={16}>
@@ -347,380 +728,59 @@ export default function Panel(props: PluginSurfaceProps<State>) {
         ) : null}
         {advisor.urgent ? <Alert tone="danger" message={t("panel.advisor.urgent", { days: daysRemaining ?? 0 })} /> : null}
 
-        <Card title={t("panel.section.switch")}>
-          <Inline gap={16} align="center">
-            <Switch checked={enabled} label={t("panel.enabled")} onChange={(next: boolean) => toggleEnabled(next)} />
-            <Text>{enabled ? t("panel.running") : t("panel.stopped")}</Text>
-            {actionOf("status") ? (
-              <ActionButton
-                action={actionOf("status")}
-                label={t("actions.status.label")}
-                onResult={() => toast.success(t("panel.msg.statsLoaded"))}
-                onError={(error: Error) => toast.error(errorText(error, t))}
-              />
-            ) : null}
-          </Inline>
-        </Card>
-
         {snapshot ? (
           <>
-            <Grid cols={5} gap={12}>
-              {STAT_KEYS.map((key) => (
-                <StatCard
-                  key={key}
-                  label={t(`panel.stat.${key}`)}
-                  value={String(t(`panel.tier.${key}.${tiers[key] ?? "unknown"}`, { defaultValue: tiers[key] ?? "-" }))}
-                />
-              ))}
-            </Grid>
-
+            {/* 顶部状态带：滚到哪个标签页都能一眼看到她现在的样子。 */}
             <Card title={t("panel.section.stats")}>
               <Stack gap={12}>
-                {STAT_KEYS.map((key) => {
-                  const value = Number(snapshot[key] ?? 0)
-                  return (
+                <Inline gap={8} align="center" wrap>
+                  <StatusBadge
+                    tone="info"
+                    label={t("panel.band.day", { day: runtime.day_number ?? snapshot.day_number ?? 0 })}
+                  />
+                  <StatusBadge tone="default" label={t("panel.band.streak", { streak: snapshot.streak_days ?? 0 })} />
+                  <StatusBadge
+                    tone="default"
+                    label={t(`panel.phase.${runtime.phase ?? "noon"}`, { defaultValue: runtime.phase ?? "-" })}
+                  />
+                  {sleeping ? <StatusBadge tone="info" label={t("panel.band.sleeping")} /> : null}
+                  <StatusBadge
+                    tone={sleeping ? "info" : "default"}
+                    label={
+                      sleeping
+                        ? t("panel.band.toWake", { minutes: runtime.minutes_to_boundary ?? 0 })
+                        : t("panel.band.toSleep", { minutes: runtime.minutes_to_boundary ?? 0 })
+                    }
+                  />
+                  {runtime.crisis && crisisAxes
+                    ? <StatusBadge tone="warning" label={t("panel.band.crisis", { axes: crisisAxes })} />
+                    : null}
+                </Inline>
+                <Grid cols={5} gap={12}>
+                  {STAT_KEYS.map((key) => (
                     <Progress
                       key={key}
-                      label={`${t(`panel.stat.${key}`)} · ${t(`panel.tier.${key}.${tiers[key] ?? "unknown"}`, {
-                        defaultValue: tiers[key] ?? "-",
-                      })} · ${value.toFixed(1)}`}
-                      value={value}
+                      label={`${t(`panel.stat.${key}`)} · ${tierOf(key)} · ${Number(snapshot[key] ?? 0).toFixed(1)}`}
+                      value={Number(snapshot[key] ?? 0)}
                     />
-                  )
-                })}
-              </Stack>
-            </Card>
-
-            <Card title={t("panel.section.trend")}>
-              {trendPoints.length > 1 ? (
-                <Stack gap={8}>
-                  {STAT_KEYS.map((key) => (
-                    <Inline key={key} gap={12} align="center">
-                      <Text>{`${t(`panel.stat.${key}`)}`}</Text>
-                      <Text>{sparkline(trendPoints.map((row) => Number(row.stats?.[key] ?? 0)))}</Text>
-                      <Text>{`${Number(trendPoints[trendPoints.length - 1]?.stats?.[key] ?? 0).toFixed(0)}`}</Text>
-                    </Inline>
-                  ))}
-                </Stack>
-              ) : (
-                <EmptyState title={t("panel.section.trend")} description={t("panel.trendHint")} />
-              )}
-            </Card>
-
-            <Card title={t("panel.section.advisor")}>
-              <Stack gap={12}>
-                <KeyValue
-                  items={[
-                    { key: "sodas", label: t("panel.field.sodas"), value: String(snapshot.sodas ?? 0) },
-                    { key: "spent", label: t("panel.field.dailySpent"), value: String(snapshot.daily_spent ?? 0) },
-                    { key: "need", label: t("panel.field.economy"), value: t("panel.advisor.need", { meals: advisor.meals_per_day ?? 0 }) },
-                    { key: "stock", label: t("panel.field.staple"), value: advisorLine },
-                    { key: "mealsToday", label: t("panel.field.mealsToday"), value: String(snapshot.meals_today ?? 0) },
-                    { key: "mealsTotal", label: t("panel.field.mealsTotal"), value: String(snapshot.meals_total ?? 0) },
-                    { key: "lastMeal", label: t("panel.field.lastMeal"), value: formatTime(snapshot.last_meal_at, t("panel.never")) },
-                  ]}
-                />
-                <Text>
-                  {t("panel.advisor.hint", {
-                    meals: advisor.meals_per_day ?? 0,
-                    horizon: advisor.horizon_days ?? 0,
-                    units: (advisor.stock_meals ?? 0) + (advisor.suggested_purchase ?? 0),
-                  })}
-                </Text>
-                {advisor.empty ? <Alert tone="danger" message={t("panel.advisor.empty")} /> : null}
-              </Stack>
-            </Card>
-
-            <Card title={t("panel.section.shop")}>
-              <Stack gap={12}>
-                <Grid cols={2} gap={12}>
-                  {catalog.map((entry) => (
-                    <Card key={String(entry.id)} title={t(`panel.item.${entry.id ?? "unknown"}`, { defaultValue: entry.id ?? "-" })}>
-                      <Stack gap={8}>
-                        <Text>{`${t("panel.field.sodas")} ${entry.cost ?? "-"}`}</Text>
-                        <Text>{t("panel.shopEffects", { effects: effectText(entry) })}</Text>
-                        <Text>
-                          {(inventory[String(entry.id)] ?? 0) > 0
-                            ? t("panel.shopOwned", { count: inventory[String(entry.id)] ?? 0 })
-                            : t("panel.shopOutOfStock")}
-                        </Text>
-                        <Button
-                          tone="success"
-                          disabled={!enabled}
-                          onClick={async () => {
-                            const result = await run("shop", { item: entry.id, quantity: 1 })
-                            if (dismissResult(result)) return
-                            if (result?.note === "shop_purchased") toast.success(t("panel.msg.shopPurchased"))
-                          }}
-                        >
-                          {t("actions.shop.label")}
-                        </Button>
-                      </Stack>
-                    </Card>
                   ))}
                 </Grid>
-                <Field label={t("fields.item")}>
-                  <Select value={buyItem} options={catalogItems} onChange={(next: any) => setBuyItem(String(next))} />
-                </Field>
-                <Field label={t("fields.quantity")}>
-                  <NumberInput
-                    value={buyQuantity}
-                    min={1}
-                    max={99}
-                    step={1}
-                    onChange={(next: number | string) => setBuyQuantity(next === "" ? "" : Number(next))}
-                  />
-                </Field>
-                <Inline gap={12}>
-                  <Button tone="success" disabled={!enabled} onClick={buy}>
-                    {t("actions.shop.label")}
-                  </Button>
+                <Inline gap={16} align="center">
+                  <Switch checked={enabled} label={t("panel.enabled")} onChange={(next: boolean) => toggleEnabled(next)} />
+                  <Text>{enabled ? t("panel.running") : t("panel.stopped")}</Text>
+                  {actionOf("status") ? (
+                    <ActionButton
+                      action={actionOf("status")}
+                      label={t("actions.status.label")}
+                      onResult={() => toast.success(t("panel.msg.statsLoaded"))}
+                      onError={(error: Error) => toast.error(errorText(error, t))}
+                    />
+                  ) : null}
                 </Inline>
               </Stack>
             </Card>
 
-            <Card title={t("panel.section.bag")}>
-              <Stack gap={12}>
-                {affordableItems.length > 0 ? (
-                  <KeyValue
-                    items={affordableItems.map((entry) => ({
-                      key: entry.value,
-                      label: entry.label,
-                      value: String(inventory[entry.value] ?? 0),
-                    }))}
-                  />
-                ) : (
-                  <EmptyState title={t("panel.section.bag")} description={t("panel.advisor.empty")} />
-                )}
-                {affordableItems.length > 0 ? (
-                  <>
-                    <Field label={t("fields.item")}>
-                      <Select
-                        value={careItem}
-                        options={affordableItems}
-                        onChange={(next: any) => setCareItem(String(next))}
-                      />
-                    </Field>
-                    <Inline gap={12}>
-                      <Button tone="primary" disabled={!enabled} onClick={care}>
-                        {t("actions.feed.label")}
-                      </Button>
-                    </Inline>
-                  </>
-                ) : null}
-              </Stack>
-            </Card>
-
-            <Card title={t("panel.section.rhythm")}>
-              <Stack gap={12}>
-                <KeyValue
-                  items={[
-                    { key: "lanlan", label: t("panel.field.lanlan"), value: snapshot.lanlan ?? "-" },
-                    {
-                      key: "phase",
-                      label: t("panel.field.phase"),
-                      value: t(`panel.phase.${runtime.phase ?? "noon"}`, { defaultValue: runtime.phase ?? "-" }),
-                    },
-                    {
-                      key: "boundary",
-                      label: runtime.sleeping ? t("panel.field.boundaryWake") : t("panel.field.boundarySleep"),
-                      value: String(runtime.minutes_to_boundary ?? 0),
-                    },
-                    { key: "dayNumber", label: t("panel.field.dayNumber"), value: String(runtime.day_number ?? 0) },
-                    { key: "streak", label: t("panel.field.streak"), value: String(snapshot.streak_days ?? 0) },
-                    {
-                      key: "anniversary",
-                      label: t("panel.field.anniversary"),
-                      value: runtime.anniversary
-                        ? runtime.anniversary.kind === "yearly"
-                          ? t("panel.anniversary.yearly", { years: runtime.anniversary.years ?? 1 })
-                          : t("panel.anniversary.milestone", { day: runtime.anniversary.day_number ?? 0 })
-                        : "-",
-                    },
-                    {
-                      key: "last",
-                      label: t("panel.field.lastTouch"),
-                      value: formatTime(snapshot.last_touch_at, t("panel.never")),
-                    },
-                    { key: "gap", label: t("panel.field.gap"), value: formatGap(snapshot.gap_hours, t) },
-                    {
-                      key: "injects",
-                      label: t("panel.field.inject24h"),
-                      value: String(snapshot.inject_count_24h ?? 0),
-                    },
-                  ]}
-                />
-                {activeHours.length > 0 ? (
-                  <Inline gap={8} wrap>
-                    {activeHours.map((item) => (
-                      <Text key={item.hour}>{`${String(item.hour).padStart(2, "0")}:00 ×${item.count}`}</Text>
-                    ))}
-                  </Inline>
-                ) : (
-                  <Text>{t("panel.hoursHint")}</Text>
-                )}
-              </Stack>
-            </Card>
-
-            <Card title={t("panel.section.feedback")}>
-              <Stack gap={12}>
-                <KeyValue
-                  items={[
-                    {
-                      key: "count",
-                      label: t("panel.field.feedbackCount"),
-                      value: String(feedback.count_today ?? 0),
-                    },
-                    {
-                      key: "quota",
-                      label: t("panel.field.feedbackQuota"),
-                      value: `${(feedback.remaining_add ?? 0).toFixed(1)} / ${(
-                        feedback.remaining_subtract ?? 0
-                      ).toFixed(1)}`,
-                    },
-                    {
-                      key: "last",
-                      label: t("panel.field.feedbackLast"),
-                      value: formatTime(feedback.last_judgment_at, t("panel.never")),
-                    },
-                  ]}
-                />
-                {judgmentHistory.length > 0 ? (
-                  <DataTable
-                    rowKey="at"
-                    data={judgmentHistory}
-                    emptyText={t("panel.never")}
-                    columns={[
-                      {
-                        key: "at",
-                        label: t("panel.field.time"),
-                        render: (row: JudgmentRecord) => formatTime(row.at, "-"),
-                      },
-                      {
-                        key: "label",
-                        label: t("panel.field.judgment"),
-                        render: (row: JudgmentRecord) =>
-                          t(`panel.judgment.${row.label ?? "neutral"}`, {
-                            defaultValue: row.label ?? "-",
-                          }),
-                      },
-                    ]}
-                  />
-                ) : (
-                  <Text>{t("panel.feedbackHint")}</Text>
-                )}
-              </Stack>
-            </Card>
-
-            <Card title={t("panel.section.tune")}>
-              <Stack gap={12}>
-                <Field label={t("panel.field.stat")} help={t("panel.tuneHelp")}>                  <Select value={tuneStat} options={statOptions} onChange={(next: any) => setTuneStat(String(next))} />
-                </Field>
-                <Field label={t("panel.field.value")}>
-                  <NumberInput
-                    value={tuneValue}
-                    min={0}
-                    max={100}
-                    step={1}
-                    onChange={(next: number | string) => setTuneValue(next === "" ? "" : Number(next))}
-                  />
-                </Field>
-                <Inline gap={12}>
-                  <Button tone="primary" disabled={!enabled} onClick={applyTune}>
-                    {t("actions.tune.label")}
-                  </Button>
-                  <Button tone="danger" onClick={resetStats}>
-                    {t("actions.reset.label")}
-                  </Button>
-                </Inline>
-              </Stack>
-            </Card>
-
-            <Card title={t("panel.section.events")}>
-              {eventHistory.length > 0 ? (
-                <Stack gap={12}>
-                  <DataTable
-                    rowKey="at"
-                    data={eventHistory}
-                    emptyText={t("panel.noEvents")}
-                    columns={[
-                      {
-                        key: "at",
-                        label: t("panel.field.time"),
-                        render: (row: EventRecord) => formatTime(row.at, "-"),
-                      },
-                      {
-                        key: "key",
-                        label: t("panel.field.event"),
-                        render: (row: EventRecord) =>
-                          t(`panel.event.${row.key ?? "unknown"}`, { defaultValue: row.key ?? "-" }),
-                      },
-                      {
-                        key: "stat",
-                        label: t("panel.field.stat"),
-                        render: (row: EventRecord) =>
-                          t(`panel.stat.${row.stat ?? "unknown"}`, { defaultValue: row.stat ?? "-" }),
-                      },
-                    ]}
-                  />
-                  <Text>{t("panel.eventsHint")}</Text>
-                </Stack>
-              ) : (
-                <EmptyState title={t("panel.noEvents")} description={t("panel.noEventsHint")} />
-              )}
-            </Card>
-
-            <Card title={t("panel.section.history")}>
-              {injections.length > 0 ? (
-                <DataTable
-                  rowKey="at"
-                  data={injections}
-                  emptyText={t("panel.noInjections")}
-                  columns={[
-                    {
-                      key: "at",
-                      label: t("panel.field.time"),
-                      render: (row: InjectionRecord) => formatTime(row.at, "-"),
-                    },
-                    {
-                      key: "trigger",
-                      label: t("panel.field.trigger"),
-                      render: (row: InjectionRecord) =>
-                        t(`panel.trigger.${row.trigger ?? "unknown"}`, { defaultValue: row.trigger ?? "-" }),
-                    },
-                    { key: "summary", label: t("panel.field.summary") },
-                  ]}
-                />
-              ) : (
-                <EmptyState title={t("panel.noInjections")} description={t("panel.noInjectionsHint")} />
-              )}
-            </Card>
-
-            <Card title={t("panel.section.config")}>
-              <KeyValue
-                items={[
-                  { key: "tick", label: t("panel.field.tick"), value: String(config.tick_seconds ?? "-") },
-                  {
-                    key: "sleep",
-                    label: t("panel.field.sleepWindow"),
-                    value: `${config.sleep_start_hour ?? "-"}:00 → ${config.sleep_end_hour ?? "-"}:00`,
-                  },
-                  { key: "moodTau", label: t("panel.field.moodTau"), value: String(config.mood_tau_hours ?? "-") },
-                  { key: "healthTau", label: t("panel.field.healthTau"), value: String(config.health_tau_hours ?? "-") },
-                  { key: "affTau", label: t("panel.field.affTau"), value: String(config.affection_tau_days ?? "-") },
-                  { key: "grace", label: t("panel.field.grace"), value: String(config.grace_hours ?? "-") },
-                  {
-                    key: "rate",
-                    label: t("panel.field.rate"),
-                    value: t("panel.rateValue", {
-                      interval: Math.round(Number(config.min_interval_sec ?? 0) / 60),
-                      max: config.max_per_hour ?? "-",
-                    }),
-                  },
-                  { key: "store", label: t("panel.field.store"), value: state?.store_available ? "OK" : "-" },
-                ]}
-              />
-            </Card>
+            <Tabs id="our_life.main" items={tabItems} />
           </>
         ) : (
           <EmptyState title={t("panel.noShard")} description={t("panel.noShardHint")} />

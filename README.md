@@ -23,8 +23,9 @@
 - 她每天自己去背包里取口粮吃：**囤的吃完了而你没回来，她就会饿**（饱食掉进"饿坏了"档会主动开口）。
 - 状态跨越档位、掉进"生病 / 闹脾气 / 饿坏了 / 累垮了"、或隔了一天你再回来时，插件会把当前状态
   注入她的上下文。
-- 面板展示五项数值、金币与背包、口粮顾问（每天几餐 / 还够几天 / 建议囤多少）、相处节律、
-  **她自己的感受**、近期走势与注入记录。
+- 面板（v0.4.1 起为「顶部常驻状态带 + 标签页」）：状态带常驻五轴数值、今日事实与总开关；
+  四个标签页分别是总览（走势 / 节律）、过日子（口粮顾问、商店、背包）、她的世界（
+  **她自己的感受**、她经历过什么）、管理（纠偏、近期注入、配置）。
 
 ## 数值机制
 
@@ -377,7 +378,7 @@ From this plugin repository root / 在当前插件仓库根目录中 / このプ
 ```bash
 # ruff：加 --offline 让它走 uv 缓存，断网也能跑（版本必须与 CI 逐字一致）
 uvx --offline ruff==0.12.4 check --ignore-noqa --config ruff.toml .
-uv run python -m pytest tests -q          # 当前 345 passed（v0.4.0）
+uv run python -m pytest tests -q          # 当前 346 passed（v0.4.1）
 uv run --with pip --project "../N.E.K.O" neko-plugin sync . --clean
 uv run --project "../N.E.K.O" neko-plugin check .
 uv run --project "../N.E.K.O" neko-plugin check -r .
