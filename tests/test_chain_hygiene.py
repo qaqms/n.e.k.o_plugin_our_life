@@ -19,7 +19,6 @@ import importlib.util
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -199,7 +198,9 @@ def test_ruff_flags_stay_identical_to_the_ci_invocation() -> None:
     )
 
 
-def test_offline_probe_hit_does_not_misreport_a_lint_failure(capsys: pytest.CaptureFixture[str]) -> None:
+def test_lint_failure_is_not_misreported_as_a_cache_miss(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """**代码有问题**和**工具没缓存**是两回事，不许混成一句"缓存未命中"。
 
     病因（本轮实测踩到）：第一版写法是"离线跑一次，失败就当缓存未命中、再联网跑一次"。
@@ -207,32 +208,79 @@ def test_offline_probe_hit_does_not_misreport_a_lint_failure(capsys: pytest.Capt
     缓存未命中，多跑一次联网、还打出一句误导人的 `（离线缓存未命中，联网解析一次…）`。
     报告里的假信号比门本身红更坏：它会把人带去查网络。
 
-    这条门在**真的**用一个隔离目录里的 lint 违规去逼 ruff 退出码 1，然后断言
-    ① 门确实红了、② 红的原因是 lint 而不是"缓存未命中"。
+    这条门逼 ruff **真的因为 lint 而退出码 1**，然后断言报告里没有"缓存未命中"那句。
+
+    两处刻意的设计（都被环境坑过之后改的）：
+
+    1. **探测结果用桩替换**：真探测会起 `uvx` 子进程，而在受限沙箱里那会在临时目录里
+       留下 uv 自己的缓存、回收时撞权限（实测 pytest 因此报
+       `PermissionError ... tmpduf7bqx7`）。这里只验"探测命中之后的那条分支"，
+       所以把探测结果钉成 True，不起子进程。
+    2. **违规样例写在工作区内**：`pytest` 的 `tmp_path` 落在 `%TEMP%`，不同环境可写性不一；
+       写在工作区里更稳，而且文件名带下划线前缀（`_gate_probe_...`），
+       pytest 不会把它收进收集面。
+
+    ⚠️ 断言必须挂在 **`capsys`** 上：那句误导信息是 `print` 到 stdout 的，
+    **不在 `_run` 的返回值里**。本门第一次重构时就漏了 `capsys`，于是断言恒真、
+    门静默失效——反向对照当场抓到了（注入误报后门仍然是绿的）。
     """
     gate = _load_gate()
     import shutil
 
-    if shutil.which(gate._RUFF_RUNNER) is None:
-        pytest.skip(f"{gate._RUFF_RUNNER} 不在 PATH 上")
-    if not gate._ruff_cached_offline():
-        pytest.skip(f"uv 缓存里没有 {gate._RUFF_PACKAGE}（离线不可用）")
+    if shutil.which(gate._RUFF_RUNNER) is None or not gate._ruff_cached_offline():
+        pytest.skip(f"ruff 不可用（{gate._RUFF_PACKAGE} 未缓存 / {gate._RUFF_RUNNER} 缺失）")
 
-    with tempfile.TemporaryDirectory() as raw:
-        sandbox = Path(raw)
-        # 故意写一个 F401（`--select ... F` 会红），且放在独立目录里，不污染本仓
-        (sandbox / "sample.py").write_text("import os\n", encoding="utf-8")
-        original = gate.PLUGIN_ROOT
-        gate.PLUGIN_ROOT = sandbox
-        try:
-            ok, output = gate.gate_ruff(sandbox, keep=False)
-        finally:
-            gate.PLUGIN_ROOT = original
+    stub = ROOT / "_gate_probe_lint_violation.py"
+    assert not stub.exists(), f"上一次没清干净：{stub}"
+    stub.write_text("import os\n", encoding="utf-8")  # F401
+    original_probe = gate._ruff_cached_offline
+    gate._ruff_cached_offline = lambda: True  # 只验命中之后的分支
+    try:
+        ok, output = gate.gate_ruff(ROOT, keep=False)
+    finally:
+        gate._ruff_cached_offline = original_probe
+        stub.unlink(missing_ok=True)
 
-    captured = capsys.readouterr()
+    printed = capsys.readouterr().out
     assert ok is False, "F401 应当让 ruff 门红"
     assert "F401" in output, f"应当是真的 lint 报错：\n{output}"
-    assert "缓存" not in captured.out, f"lint 失败被误报成缓存未命中：\n{captured.out}"
+    assert "缓存" not in printed, f"lint 失败被误报成缓存未命中：\n{printed}"
+
+
+def test_offline_probe_is_actually_probed() -> None:
+    """上一条门把探测结果钉成 True，所以**探测本身**得另有门看着。
+
+    语义：探测返回 False（缓存没有该工具）时，`gate_ruff` 必须打印"联网解析一次"
+    并走不带 `--offline` 的那条命令；返回 True 时不许打印那句、也不许去掉 `--offline`。
+    这里用桩替换掉 `_run`，所以不依赖网络与缓存状态，任何环境都能验。
+    """
+    gate = _load_gate()
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Any, *, timeout: float = 1800.0) -> tuple[bool, str]:
+        calls.append(list(cmd))
+        return True, ""
+
+    original_run = gate._run
+    original_probe = gate._ruff_cached_offline
+    gate._run = fake_run
+    try:
+        gate._ruff_cached_offline = lambda: True
+        gate.gate_ruff(ROOT, keep=False)
+        hit: list[list[str]] = list(calls)
+        calls.clear()
+
+        gate._ruff_cached_offline = lambda: False
+        gate.gate_ruff(ROOT, keep=False)
+        miss: list[list[str]] = list(calls)
+    finally:
+        gate._run = original_run
+        gate._ruff_cached_offline = original_probe
+
+    assert len(hit) == 1 and "--offline" in hit[0], f"命中缓存时应离线跑：{hit}"
+    assert len(miss) == 1 and "--offline" not in miss[0], f"未命中时应联网跑：{miss}"
+    # 两种情况下钉住的版本都不许变
+    assert gate._RUFF_PACKAGE in hit[0] and gate._RUFF_PACKAGE in miss[0]
 
 
 def test_gate_never_silently_falls_back_to_an_unpinned_ruff() -> None:
