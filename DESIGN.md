@@ -141,6 +141,20 @@ v0.1.0（首版）：
 6. fail-closed 总开关 `[our_life].enabled = false`（默认关：未打开前不注入、不结算、不推送）
 7. 中英 i18n、`tests/` 数值门 + i18n 契约门、`tools/release_gate.py` 五门
 
+## v0.4.3 Scope（面板自动刷新，第十一轮）
+
+1. **轮询**：`useEffect` + `setInterval(10s)` 调 `props.api.refresh()`，节奏与 `tick_seconds=30`
+   的结算周期同量级；写法沿用 `forever_companion` 真机验证过的形态。
+2. **三条性能闸门**：防重入（`refreshBusy` ref，未返回就跳拍，慢则自动降频）、
+   后台暂停（`document.hidden` 不拉）、回可见补拉（`visibilitychange`）。失败静默、下拍重试。
+3. **手动刷新按钮退役**（状态带 + 空态两处）；`actionOf`/`HostedAction` 随之移除。
+   Python 侧 `status` 入口**不动**（Agent / 命令面板还在用，note 同步门的键还在）。
+   动作后的即时刷新走宿主 `refresh_context=True`。
+4. **纯面板轮**：Python 零改动；新增刷新门断言轮询三形态存在、`<ActionButton`/`actionOf` 不回潮。
+
+刻意不做：把轮询间隔做成配置项（它是 UI 实现细节，不是行为参数）；
+WebSocket/推送式面板同步（宿主 context 模型是拉式，不自造通道）。
+
 ## v0.4.2 Scope（真机首跑适配：面板焦点 / deadlock / 流式布局，第十轮）
 
 1. **归属解析链升级**：`_ctx（本次注入，权威）> 面板焦点 > 全局唯一分片`。焦点由新入口

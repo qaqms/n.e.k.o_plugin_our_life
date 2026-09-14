@@ -110,6 +110,24 @@ def test_panel_uses_tabbed_layout_with_a_persistent_status_band() -> None:
     assert 'run("focus"' in source, "shard switcher must drive the focus entry"
 
 
+def test_panel_auto_refreshes_and_has_no_manual_refresh_button() -> None:
+    """v0.4.3 刷新门：面板靠轮询自动同步，手动「刷新」按钮不得回潮。
+
+    轮询的三条性能闸门各有其形：防重入（busy ref）、后台暂停与回可见补拉
+    （visibilitychange）、固定节奏（setInterval + AUTO_REFRESH_MS）。
+    动作后的即时刷新走宿主的 refresh_context=True，不在此门范围。
+    """
+    source = _panel_source()
+    assert "setInterval" in source and "AUTO_REFRESH_MS" in source, (
+        "panel must poll the context automatically"
+    )
+    assert "props.api.refresh()" in source, "auto refresh must go through props.api.refresh"
+    assert "refreshBusy" in source, "polling must guard against overlapping refreshes"
+    assert "visibilitychange" in source, "polling must pause in background / catch up on return"
+    assert "<ActionButton" not in source, "manual refresh button retired in v0.4.3"
+    assert "actionOf" not in source, "dead helper of the retired button must not come back"
+
+
 def test_panel_has_a_single_default_function_export() -> None:
     source = _panel_source()
     # 只数真正的导出语句（注释里也会出现这个词，见本模块 docstring 的说明）

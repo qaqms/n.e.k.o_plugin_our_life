@@ -14,8 +14,9 @@
 // - **Tabs 四页**：总览（走势 + 相处节律）/ 过日子（口粮顾问 + 商店 + 背包）/
 //   她的世界（她自己的感受 + 她经历过什么）/ 管理（纠偏 + 近期注入 + 配置）。
 //   Tab 激活态由 kit 的 `useLocalState("tabs:<id>")` 持久化，刷新上下文不丢位置。
+// - **自动刷新（v0.4.3）**：状态带里的手动「刷新」按钮已退役，面板每 10s 自动拉一次
+//   context（带防重入 / 后台暂停 / 回可见补拉三条性能闸门），见 Panel 内注释。
 import {
-  ActionButton,
   Alert,
   Button,
   Card,
@@ -39,10 +40,12 @@ import {
   Tabs,
   Text,
   useConfirm,
+  useEffect,
   useLocalState,
+  useRef,
   useToast,
 } from "@neko/plugin-ui"
-import type { HostedAction, PluginSurfaceProps } from "@neko/plugin-ui"
+import type { PluginSurfaceProps } from "@neko/plugin-ui"
 
 type ShardSnapshot = {
   lanlan?: string
@@ -169,6 +172,9 @@ type State = {
 }
 
 const STAT_KEYS = ["energy", "satiety", "mood", "health", "affection"] as const
+
+// 自动轮询节奏（v0.4.3）：见 Panel 内「自动刷新」注释段的三条性能闸门论证。
+const AUTO_REFRESH_MS = 10000
 const TREND_LEVELS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
 
 function camel(code: string): string {
@@ -223,7 +229,7 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   // 文本级规则（连注释都不跳过），一旦文件里出现它的裸标识符形态就会被判成
   // "用了全局对象"而拒收（catgirl_seiyuu 台账里踩过同一个坑）。
   // 一律写完整的成员访问形式。
-  const { t, state, actions } = props
+  const { t, state } = props
   const toast = useToast()
   const confirm = useConfirm()
   const [tuneStat, setTuneStat] = useLocalState<string>("our_life.tune.stat", "mood")
@@ -244,9 +250,6 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   const inventory = snapshot?.inventory ?? {}
   const catalog = state?.shop ?? []
   const sleeping = runtime.sleeping ?? snapshot?.sleeping ?? false
-
-  const actionOf = (id: string): HostedAction | undefined =>
-    actions.find((action) => action.id === id || action.entry_id === id)
 
   const run = async (actionId: string, args: Record<string, any>) => {
     try {
@@ -337,6 +340,40 @@ export default function Panel(props: PluginSurfaceProps<State>) {
     }
     await props.api.refresh()
   }
+
+  // 自动刷新（v0.4.3）：手动「刷新」按钮退役——面板数值是后端 tick 结算后、
+  // 读取时刻按真实时间折算的结果，让用户按按钮去拉快照等于让用户充当定时器。
+  // 三条性能闸门：
+  // - 防重入：上一轮 refresh 未返回就跳过本拍（不排队、不叠加请求）；
+  // - 后台暂停：document.hidden（面板不可见）时不拉数据；
+  // - 回可见补拉：从后台切回来立刻补一轮，再恢复常态节奏。
+  // 10s 与 tick_seconds=30 的结算周期同量级：面板最多滞后 10 秒；她「主动开口」
+  // 走 push 通道、不依赖这里，轮询只服务面板观察。动作自带 refresh_context=True，
+  // 成功反馈的即时刷新由宿主负责，这里只管「没有人操作时数据也不旧」。
+  const refreshBusy = useRef(false)
+  useEffect(() => {
+    const hidden = () => typeof document !== "undefined" && document.hidden === true
+    const tick = async () => {
+      if (refreshBusy.current || hidden()) return
+      refreshBusy.current = true
+      try {
+        await props.api.refresh()
+      } catch {
+        // 轮询失败静默忽略、下拍重试：面板可能开着没人看，这时弹 toast 只是噪音。
+      } finally {
+        refreshBusy.current = false
+      }
+    }
+    const onVisibility = () => {
+      if (!hidden()) void tick()
+    }
+    const timer = setInterval(tick, AUTO_REFRESH_MS)
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibility)
+    return () => {
+      clearInterval(timer)
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibility)
+    }
+  }, [])
 
   const statOptions = STAT_KEYS.map((key) => ({ value: key, label: t(`panel.stat.${key}`) }))
   const catalogItems = catalog.map((entry) => ({
@@ -824,14 +861,6 @@ export default function Panel(props: PluginSurfaceProps<State>) {
                 <Inline gap={16} align="center">
                   <Switch checked={enabled} label={t("panel.enabled")} onChange={(next: boolean) => toggleEnabled(next)} />
                   <Text>{enabled ? t("panel.running") : t("panel.stopped")}</Text>
-                  {actionOf("status") ? (
-                    <ActionButton
-                      action={actionOf("status")}
-                      label={t("actions.status.label")}
-                      onResult={() => toast.success(t("panel.msg.statsLoaded"))}
-                      onError={(error: Error) => toast.error(errorText(error, t))}
-                    />
-                  ) : null}
                 </Inline>
               </Stack>
             </Card>
@@ -847,14 +876,6 @@ export default function Panel(props: PluginSurfaceProps<State>) {
                 <Inline gap={16} align="center" wrap>
                   <Switch checked={enabled} label={t("panel.enabled")} onChange={(next: boolean) => toggleEnabled(next)} />
                   <Text>{enabled ? t("panel.running") : t("panel.stopped")}</Text>
-                  {actionOf("status") ? (
-                    <ActionButton
-                      action={actionOf("status")}
-                      label={t("actions.status.label")}
-                      onResult={() => toast.success(t("panel.msg.statsLoaded"))}
-                      onError={(error: Error) => toast.error(errorText(error, t))}
-                    />
-                  ) : null}
                 </Inline>
                 {focusSwitcher}
                 <EmptyState title={t("panel.noShard")} description={t("panel.noShardHint")} />
