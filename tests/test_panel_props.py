@@ -130,6 +130,21 @@ def test_panel_auto_refreshes_and_has_no_manual_refresh_button() -> None:
     assert "actionOf" not in source, "dead helper of the retired button must not come back"
 
 
+def test_panel_overrides_the_kit_disabled_button_cursor() -> None:
+    """v0.4.5 门：kit 的 `.neko-button:disabled` 是 `cursor: wait`（转圈等待光标），
+
+    而我们的禁用只意味着"总开关关了、按不了"，不是"处理中"。面板必须自带
+    `not-allowed` 覆盖（经 `<style>` 注入，与宿主样式同特异度、后置获胜）。
+    """
+    source = _panel_source()
+    assert "<style>{PANEL_STYLE_OVERRIDES}</style>" in source, (
+        "panel must inject its style overrides"
+    )
+    assert ".neko-button:disabled { cursor: not-allowed; }" in source, (
+        "disabled buttons must show not-allowed, not the kit's wait spinner"
+    )
+
+
 def test_panel_refreshes_context_after_every_successful_action() -> None:
     """v0.4.4 门：所有动作走同一个 run()，成功路径必须拉一次 context。
 

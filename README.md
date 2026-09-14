@@ -380,7 +380,7 @@ From this plugin repository root / 在当前插件仓库根目录中 / このプ
 ```bash
 # ruff：加 --offline 让它走 uv 缓存，断网也能跑（版本必须与 CI 逐字一致）
 uvx --offline ruff==0.12.4 check --ignore-noqa --config ruff.toml .
-uv run python -m pytest tests -q          # 当前 354 passed（v0.4.3）
+uv run python -m pytest tests -q          # 当前 356 passed（v0.4.5）
 uv run --with pip --project "../N.E.K.O" neko-plugin sync . --clean
 uv run --project "../N.E.K.O" neko-plugin check .
 uv run --project "../N.E.K.O" neko-plugin check -r .

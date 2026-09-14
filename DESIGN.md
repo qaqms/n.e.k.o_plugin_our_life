@@ -141,6 +141,12 @@ v0.1.0（首版）：
 6. fail-closed 总开关 `[our_life].enabled = false`（默认关：未打开前不注入、不结算、不推送）
 7. 中英 i18n、`tests/` 数值门 + i18n 契约门、`tools/release_gate.py` 五门
 
+## v0.4.5 Scope（禁用按钮光标：not-allowed，第十三轮）
+
+1. 面板根部注入 `.neko-button:disabled { cursor: not-allowed; }`（已知陷阱 §14）。
+2. 新增光标门：`<style>{PANEL_STYLE_OVERRIDES}</style>` 与 not-allowed 字面量必须在。
+3. 纯样式轮：交互、刷新通道、Python 侧零改动。
+
 ## v0.4.4 Scope（动作后即时刷新：金币/背包"后台扣了前台不动"，第十二轮）
 
 1. **根因**：kit 只在 `ActionButton`/`ActionForm` 里兑现 `refresh_context`（runtime.js 两处），
@@ -347,6 +353,11 @@ WebSocket/推送式面板同步（宿主 context 模型是拉式，不自造通�
     面板会停在"后台已扣、前台不动"（如商店购买后的金币/背包）。
     本面板因此自带单飞通道 `refreshContext()`（`run()` 成功路径与轮询共用），
     Python 侧的 `refresh_context=True` 声明保留（对 ActionButton 形态的调用方仍有效）。
+14. **kit 的禁用按钮画成“忙”**：`.neko-button:disabled { cursor: wait }`
+    （`ui-kit/styles.css:123`）——鼠标悬停出现转圈的等待光标，读起来像“处理中”，
+    而插件侧的禁用多半是“现在按不了”。平台 CSS 只读，面板侧解法是根部注入
+    `<style>` 覆盖为 `not-allowed`（同特异度后置获胜，不用 `!important`）；
+    kit 的 Button 没有内部 spinner，“转圈”只可能是这条光标。
 
 ## Risk Follow-ups
 

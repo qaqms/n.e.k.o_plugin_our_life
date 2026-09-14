@@ -175,6 +175,12 @@ type State = {
 
 const STAT_KEYS = ["energy", "satiety", "mood", "health", "affection"] as const
 
+// 禁用态光标覆盖（v0.4.5）：kit 的 `.neko-button:disabled` 样式是 `cursor: wait`
+//（宿主 ui-kit/styles.css，转圈“等待”光标），但“总开关关了”只是**按不了**、
+// 不是“处理中”——鼠标一放上去就转圈，读起来像按钮在忙。平台层 CSS 只读，
+// 这里用面板级 <style> 覆盖：同特异度后来者赢，kit 样式表必然先于面板内联样式入文档。
+const PANEL_STYLE_OVERRIDES = ".neko-button:disabled { cursor: not-allowed; }"
+
 // 自动轮询节奏（v0.4.3）：见 Panel 内「自动刷新」注释段的三条性能闸门论证。
 const AUTO_REFRESH_MS = 10000
 const TREND_LEVELS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
@@ -834,6 +840,7 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   return (
     <Page title={t("panel.title")} subtitle={t("panel.subtitle")}>
       <Stack gap={16}>
+        <style>{PANEL_STYLE_OVERRIDES}</style>
         {!enabled ? <Alert tone="warning" message={t("panel.frozen")} /> : null}
         {state?.error_code ? (
           <Alert tone="danger" message={t(`panel.errors.${camel(String(state.error_code))}`)} />
