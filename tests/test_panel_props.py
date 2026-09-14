@@ -113,19 +113,36 @@ def test_panel_uses_tabbed_layout_with_a_persistent_status_band() -> None:
 def test_panel_auto_refreshes_and_has_no_manual_refresh_button() -> None:
     """v0.4.3 刷新门：面板靠轮询自动同步，手动「刷新」按钮不得回潮。
 
-    轮询的三条性能闸门各有其形：防重入（busy ref）、后台暂停与回可见补拉
-    （visibilitychange）、固定节奏（setInterval + AUTO_REFRESH_MS）。
-    动作后的即时刷新走宿主的 refresh_context=True，不在此门范围。
+    轮询的三条性能闸门各有其形：单飞合并（busy + trailing rerun ref）、后台暂停与
+    回可见补拉（visibilitychange）、固定节奏（setInterval + AUTO_REFRESH_MS）。
+    v0.4.4 起这条通道同时服务动作后的即时刷新（kit 只对 ActionButton/ActionForm
+    兑现 refresh_context，普通 Button 面板必须自己拉——金币/背包"后台扣了前台不动"的根因）。
     """
     source = _panel_source()
     assert "setInterval" in source and "AUTO_REFRESH_MS" in source, (
         "panel must poll the context automatically"
     )
-    assert "props.api.refresh()" in source, "auto refresh must go through props.api.refresh"
-    assert "refreshBusy" in source, "polling must guard against overlapping refreshes"
+    assert "refreshBusy" in source and "refreshRerun" in source, (
+        "refresh must be single-flight with a coalesced trailing rerun, not a request queue"
+    )
     assert "visibilitychange" in source, "polling must pause in background / catch up on return"
     assert "<ActionButton" not in source, "manual refresh button retired in v0.4.3"
     assert "actionOf" not in source, "dead helper of the retired button must not come back"
+
+
+def test_panel_refreshes_context_after_every_successful_action() -> None:
+    """v0.4.4 门：所有动作走同一个 run()，成功路径必须拉一次 context。
+
+    断言全文件只有 refreshContext 一处 `props.api.refresh()`：动作处理器与轮询
+    都只能通过这条单飞通道刷新——谁再手写第二处，就是绕过了合并闸门。
+    """
+    source = _panel_source()
+    assert "if (result) await refreshContext()" in source, (
+        "run() must refresh the context on every successful action"
+    )
+    assert source.count("props.api.refresh()") == 1, (
+        "props.api.refresh() must live only inside the shared refreshContext channel"
+    )
 
 
 def test_panel_has_a_single_default_function_export() -> None:

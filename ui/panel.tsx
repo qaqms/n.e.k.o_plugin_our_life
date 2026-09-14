@@ -16,6 +16,8 @@
 //   Tab 激活态由 kit 的 `useLocalState("tabs:<id>")` 持久化，刷新上下文不丢位置。
 // - **自动刷新（v0.4.3）**：状态带里的手动「刷新」按钮已退役，面板每 10s 自动拉一次
 //   context（带防重入 / 后台暂停 / 回可见补拉三条性能闸门），见 Panel 内注释。
+// - **动作后即时刷新（v0.4.4）**：kit 只对 ActionButton/ActionForm 兑现 refresh_context，
+//   本面板全走普通 Button——run() 成功后自己调 refreshContext（与轮询共用单飞通道）。
 import {
   Alert,
   Button,
@@ -251,10 +253,39 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   const catalog = state?.shop ?? []
   const sleeping = runtime.sleeping ?? snapshot?.sleeping ?? false
 
+  // context 拉取的唯一通道（v0.4.4）：轮询与动作后的即时刷新共用，单飞 + 尾随合并。
+  // v0.4.3 的教训：`refresh_context=True` 只有 kit 的 ActionButton/ActionForm 会自动消费
+  // （宿主 ui-kit/runtime.js），本面板全部走普通 Button + props.api.call——
+  // 动作成功后没人重拉 context，金币/背包就会「后台已扣、前台不更新」。
+  // 合并而非排队：同一时刻最多一个在途请求 + 一次尾随补拉，慢机器也不叠请求。
+  const refreshBusy = useRef(false)
+  const refreshRerun = useRef(false)
+  const refreshContext = async () => {
+    if (refreshBusy.current) {
+      refreshRerun.current = true
+      return
+    }
+    refreshBusy.current = true
+    try {
+      do {
+        refreshRerun.current = false
+        await props.api.refresh()
+      } while (refreshRerun.current)
+    } catch {
+      // 刷新失败静默：动作本身已成功、数据已落库，轮询会在下一拍补上。
+    } finally {
+      refreshBusy.current = false
+      refreshRerun.current = false
+    }
+  }
+
   const run = async (actionId: string, args: Record<string, any>) => {
     try {
       const envelope = await props.api.call(actionId, args, { timeoutMs: 20000 })
-      return envelopeResult(envelope)
+      const result = envelopeResult(envelope)
+      // 成功（含 store_unavailable 降级码）才拉：Err 会以异常走下面的 catch，不该动 context。
+      if (result) await refreshContext()
+      return result
     } catch (error) {
       toast.error(errorText(error, t))
       return null
@@ -338,31 +369,22 @@ export default function Panel(props: PluginSurfaceProps<State>) {
     } else if (result?.note === "focus_cleared") {
       toast.success(t("panel.msg.focusCleared"))
     }
-    await props.api.refresh()
   }
 
   // 自动刷新（v0.4.3）：手动「刷新」按钮退役——面板数值是后端 tick 结算后、
   // 读取时刻按真实时间折算的结果，让用户按按钮去拉快照等于让用户充当定时器。
   // 三条性能闸门：
-  // - 防重入：上一轮 refresh 未返回就跳过本拍（不排队、不叠加请求）；
+  // - 单飞合并：refreshContext 内部保证同一时刻最多一个在途 + 一次尾随补拉；
   // - 后台暂停：document.hidden（面板不可见）时不拉数据；
   // - 回可见补拉：从后台切回来立刻补一轮，再恢复常态节奏。
   // 10s 与 tick_seconds=30 的结算周期同量级：面板最多滞后 10 秒；她「主动开口」
-  // 走 push 通道、不依赖这里，轮询只服务面板观察。动作自带 refresh_context=True，
-  // 成功反馈的即时刷新由宿主负责，这里只管「没有人操作时数据也不旧」。
-  const refreshBusy = useRef(false)
+  // 走 push 通道、不依赖这里，轮询只服务面板观察。动作后的即时刷新走 run()
+  // 成功路径，与这里共用 refreshContext——轮询只是「没有人操作时数据也不旧」的兜底。
   useEffect(() => {
     const hidden = () => typeof document !== "undefined" && document.hidden === true
     const tick = async () => {
-      if (refreshBusy.current || hidden()) return
-      refreshBusy.current = true
-      try {
-        await props.api.refresh()
-      } catch {
-        // 轮询失败静默忽略、下拍重试：面板可能开着没人看，这时弹 toast 只是噪音。
-      } finally {
-        refreshBusy.current = false
-      }
+      if (hidden()) return
+      await refreshContext()
     }
     const onVisibility = () => {
       if (!hidden()) void tick()

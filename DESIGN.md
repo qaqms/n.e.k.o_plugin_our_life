@@ -141,6 +141,21 @@ v0.1.0（首版）：
 6. fail-closed 总开关 `[our_life].enabled = false`（默认关：未打开前不注入、不结算、不推送）
 7. 中英 i18n、`tests/` 数值门 + i18n 契约门、`tools/release_gate.py` 五门
 
+## v0.4.4 Scope（动作后即时刷新：金币/背包"后台扣了前台不动"，第十二轮）
+
+1. **根因**：kit 只在 `ActionButton`/`ActionForm` 里兑现 `refresh_context`（runtime.js 两处），
+   本面板全走普通 `Button` + `props.api.call`——动作成功后没人重拉 context（已知陷阱 §13）。
+2. **单飞 + 尾随合并的 `refreshContext()`**：同一时刻最多一个在途 + 一次尾随补拉
+   （`refreshBusy`/`refreshRerun` refs），轮询与动作刷新共用，慢机器上不叠请求。
+3. **`run()` 成功路径统一调 `refreshContext()`**；Err 走异常、不动 context；
+   八个动作处理器零改动。`switchFocus` 的手动补拉移除。
+4. **门**：全文件 `props.api.refresh()` 只允许出现在 `refreshContext` 内一处
+   （数次数），谁手写第二处就是绕过合并闸门。
+
+刻意不做：把普通 Button 换成 ActionButton（表单形态不合商店/背包的交互形状，且通道已进门）；
+改 Python 侧 `refresh_context` 声明（它对 ActionButton 形态调用方仍有效，也是宿主将来
+在 api.call 层兑现该标志时的自愈面）。
+
 ## v0.4.3 Scope（面板自动刷新，第十一轮）
 
 1. **轮询**：`useEffect` + `setInterval(10s)` 调 `props.api.refresh()`，节奏与 `tick_seconds=30`
@@ -326,6 +341,12 @@ WebSocket/推送式面板同步（宿主 context 模型是拉式，不自造通�
     的 `assertPathInsideRepo` 用 `realpathSync` 比对），所以它**只能**对宿主仓内的副本跑，
     对仓外工作区路径会直接报 "Plugin search target outside repo root"。
     这也是 release_gate 必须复制副本的原因之一。
+13. **`refresh_context=True` 只有 kit 的 `ActionButton`/`ActionForm` 会兑现**（真机踩坑，v0.4.4 修）：
+    宿主 `ui-kit/runtime.js` 的两处 `if (action.refresh_context !== false) await api.refresh()`
+    都长在**组件**里，普通 `Button` + `props.api.call(...)` 成功后**不会**重拉 context——
+    面板会停在"后台已扣、前台不动"（如商店购买后的金币/背包）。
+    本面板因此自带单飞通道 `refreshContext()`（`run()` 成功路径与轮询共用），
+    Python 侧的 `refresh_context=True` 声明保留（对 ActionButton 形态的调用方仍有效）。
 
 ## Risk Follow-ups
 

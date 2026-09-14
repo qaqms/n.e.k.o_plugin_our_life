@@ -3,6 +3,37 @@
 本插件采用"轮次叙事"记录：每一轮写清**病因 / 做法 / 验证 / 测试数**，而不是只列增删。
 历史条目只追加、不改写。
 
+## [0.4.4] - 2026-09-14（第十二轮 · 动作后即时刷新：金币/背包"后台扣了前台不动"）
+
+### 病灶：refresh_context=True 是个没人兑现的口头承诺（真机反馈）
+
+买完东西金币与背包只变了后台、前台不动。读宿主 `ui-kit/runtime.js` 后确认：
+`refresh_context` **只有 kit 的 `ActionButton`/`ActionForm` 会自动消费**（runtime.js 两处
+`if (action.refresh_context !== false) await api.refresh()`）。而本面板的购买/喂食/
+纠偏/开关/重置全部走普通 `Button` + `props.api.call`——动作成功后没有任何人重拉
+context。Python 侧八个动作声明的 `refresh_context=True` 一直是空头支票；
+上一轮的 10s 轮询只是把症状遮成"最多晚 10 秒"，不是修。
+全仓唯一写对的是 `switchFocus`（手动补了一次 `props.api.refresh()`）。
+
+### 做法
+
+1. **单飞 + 尾随合并的 `refreshContext()`**：同一时刻最多一个在途请求；
+   在途期间新来的合并为一次"尾随补拉"（`refreshRerun` ref），不排队、不叠加——
+   既保证点完购买立刻重拉，又保证慢机器上轮询与动作刷新不会互相堆雪球。
+2. **`run()` 成功路径统一调 `refreshContext()`**：Err 以异常走 catch、不动 context；
+   八个动作处理器一行都不用改（它们全部经过 run）。
+3. **轮询与补拉改用同一通道**：v0.4.3 的"防重入"升级为"单飞合并"，
+   后台暂停 / 回可见补拉不变。
+4. **`switchFocus` 的手动 refresh 移除**（run("focus") 已走通道），全文件
+   `props.api.refresh()` 只剩 `refreshContext` 内一处——由新门钉死，
+   谁再手写第二处就是绕过合并闸门。
+5. **纯面板轮**：Python 侧零改动（八个动作的 `refresh_context=True` 声明保留：
+   它对 ActionButton 形态的调用方仍然有效，也是宿主升级后的自愈面）。
+
+### 验证
+
+`354 → 355 passed`（刷新门升级 + 新增"通道唯一性"门）；五门发版校验链全绿。
+
 ## [0.4.3] - 2026-09-14（第十一轮 · 面板自动刷新：手动「刷新」按钮退役）
 
 ### 病灶：用户在替插件当定时器
