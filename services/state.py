@@ -213,6 +213,21 @@ class StateStore:
     def cached(self) -> dict[str, ShardState]:
         return self._cache
 
+    @property
+    def store_available(self) -> bool:
+        """宿主**是否给了 store 通道对象**（唯一的"持久化到底可不可用"判据）。
+
+        为什么不是"读写成不成功"：本模块的既定契约是**持久化失败只降级、不抛给调用方**
+        （见模块 docstring），所以 `get`/`set` 返回 `Err` 时插件照常工作、只是活不过重启。
+        那种失败是每拍都可能发生的瞬时故障，把它当成"存储不可用"会让面板一直报错，
+        而真实原因是通道还在、只是这一下没通。
+
+        通道对象**整个缺席**（`None`）则不同：那是持久化从头到尾不可能可用，属配置/装配错误，
+        值得如实告诉用户。宿主侧 `router.store` 就是 `getattr(main_plugin, "store", None)`，
+        所以这个状态是真实可达的，不是防御性摆设。
+        """
+        return getattr(self._plugin, "store", None) is not None
+
     def known_lanlans(self) -> tuple[str, ...]:
         return tuple(sorted(self._cache))
 

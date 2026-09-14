@@ -400,6 +400,89 @@ def test_dashboard_survives_store_unavailable(
 
 
 # ---------------------------------------------------------------------------
+# store 通道整个缺席（`store_unavailable` 的接线门）
+# ---------------------------------------------------------------------------
+#
+# 边界刻意划在这里：**只有"通道对象不在"才算 `store_unavailable`**。
+# `get`/`set` 返回 `Err` 的瞬时降级不算——那是本插件的既定容错契约
+# （`services/state.py` 模块 docstring：持久化失败只降级、不抛给调用方），
+# 把它也算进来的话，每拍都可能发生的瞬时故障会让面板横幅一直挂着。
+# 上面那条 `test_dashboard_survives_store_unavailable` 正是这条边界的守门测试。
+
+
+def test_store_available_reflects_the_channel_object_only(make_plugin: Any, make_store: Any) -> None:
+    plugin, _host = make_plugin()
+    assert plugin._store.store_available is True
+    plugin.store = None
+    assert plugin._store.store_available is False
+    assert plugin._store.store_available is False  # 只读探测，不产生副作用
+
+
+def test_status_reports_store_unavailable_instead_of_playing_healthy(
+    make_plugin: Any, run_async: Any
+) -> None:
+    """通道缺席时 `status` 必须如实回码，不能假装"一切正常"。
+
+    真机上这条通路的意义：数值只在内存里、重启就丢；面板拿到 `store_unavailable`
+    才能显示横幅。修复前它无论如何都回 `stats_loaded`，等于对用户说谎。
+    """
+    plugin, host = make_plugin()
+    host.store.data[SHARD_KEY] = _shard_payload(now=time.time())
+    plugin.store = None  # 模拟宿主没给出 store 通道
+    result = run_async(plugin.status_entry(_ctx={"lanlan_name": "灵"}))
+
+    value = result.value
+    assert value["note"] == "store_unavailable"
+    assert value["store_available"] is False
+    # 数值照旧可读（内存缓存），只是活不过重启——如实回码不等于拒绝服务
+    assert value["tiers"]["mood"] in {"sulking", "low", "calm", "happy", "elated"}
+
+
+def test_tune_and_reset_admit_when_nothing_was_persisted(make_plugin: Any, run_async: Any) -> None:
+    """`tune` / `reset` 在通道缺席时也要如实回码——"改成功了"是句假话。"""
+    plugin, _host = make_plugin()
+    plugin.store = None
+
+    tuned = run_async(plugin.tune_entry(stat="mood", value=80.0, _ctx={"lanlan_name": "灵"}))
+    assert tuned.value["note"] == "store_unavailable"
+    assert tuned.value["value"] == 80.0  # 内存里确实改了
+
+    reset = run_async(plugin.reset_entry(_ctx={"lanlan_name": "灵"}))
+    assert reset.value["note"] == "store_unavailable"
+
+
+def test_dashboard_raises_the_banner_code_only_when_the_channel_is_absent(
+    make_plugin: Any, run_async: Any
+) -> None:
+    plugin, host = make_plugin()
+    host.store.data[SHARD_KEY] = _shard_payload(now=time.time())
+
+    healthy = run_async(plugin.dashboard_context(_ctx={"lanlan_name": "灵"}))
+    assert healthy["store_available"] is True
+    assert "error_code" not in healthy  # 通道在 ⇒ 不挂横幅
+
+    plugin.store = None
+    broken = run_async(plugin.dashboard_context(_ctx={"lanlan_name": "灵"}))
+    assert broken["store_available"] is False
+    assert broken["error_code"] == "store_unavailable"
+
+
+def test_switch_still_works_without_the_store_channel(
+    make_plugin: Any, run_async: Any
+) -> None:
+    """总开关走的是**配置层**，与数据 store 是两条通道——store 缺席不许挡住开关。
+
+    这条门钉住一个刻意的"不改语义"决定：一度想在 `switch` 上用
+    `store_available` 挡写，但那会是误报（配置写不下该看 `config_unavailable`）。
+    """
+    plugin, _host = make_plugin()
+    plugin.store = None
+    result = run_async(plugin.switch_entry(enabled=True, _ctx={"lanlan_name": "灵"}))
+    assert result.is_ok()
+    assert result.value["note"] == "enabled"
+
+
+# ---------------------------------------------------------------------------
 # LLM 工具
 # ---------------------------------------------------------------------------
 

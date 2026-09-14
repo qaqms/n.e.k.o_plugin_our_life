@@ -3,6 +3,43 @@
 本插件采用"轮次叙事"记录：每一轮写清**病因 / 做法 / 验证 / 测试数**，而不是只列增删。
 历史条目只追加、不改写。
 
+## [0.1.0] - 2026-09-14（第五轮 · `store_unavailable` 死码收口）
+
+### 病灶：一个为"改动没落盘"写好的码，从来没人接线
+
+`core/codes.py` 里登记着 `store_unavailable`，两份 i18n 里也有对应文案
+（"存储暂时不可用，这次改动没有落盘" / "Storage is unavailable, so this change was not
+persisted"）——但全仓没有一处返回它。于是 store 通道真的不在时，插件照样回
+`stats_loaded` / `stat_updated` / `stats_reset`，等于告诉用户"一切正常"，
+而实际上数值只在内存里、重启就丢。
+
+**判据（本轮定下的边界）**：只有**"store 通道对象整个缺席"**才算 `store_unavailable`。
+
+- `plugin/sdk/shared/core/router.py` 的 `store` 是
+  `getattr(main_plugin, "store", None)`，`None` 是**真实可达状态**，不是防御性摆设。
+- `get` / `set` 返回 `Err` 的**瞬时降级不算**：本插件的既定契约是"持久化失败只降级、
+  不抛给调用方"（`services/state.py` 模块 docstring），那种失败每拍都可能发生，
+  算成"不可用"会让面板横幅一直挂着——属误报。
+
+**做法**：`StateStore.store_available` 作单一来源（替掉 dashboard 里那处就地 `getattr`），
+在 `dashboard_context`（挂 `error_code` 让面板显示横幅）、`status_entry`、
+`tune_entry`、`reset_entry` 四处如实回码。
+
+**刻意不动的一处**：`switch_entry` 走的是**配置层** `self.config.set`，与数据 store 是两条
+独立通道，用 store 缺席与否去挡开关会是误报——所以只留一条 warning 记痕，语义原样。
+这个决定有专门的常驻门（`test_switch_still_works_without_the_store_channel`）钉住，
+免得后来者"顺手"把它一起改了。
+
+**验证**：`tests/test_entries.py` 新增 5 条门；反向对照做过——把 `store_available` 改成恒
+`True`、把横幅码换成别的码，对应门均变红，还原后全绿。`148 → 152 passed`（+1 skipped，
+见下）。
+
+**环境说明**：本轮在 workspace-write 沙箱下，`uv` 的缓存/工具目录（都在工作区外）被挡，
+`uvx` 也取不到 `ruff==0.12.4`——**所以 `ruff` 门与前一轮那条"lint 失败别误报缓存未命中"的门
+在本机跑不了**（后者按设计跳过）。已把走法写进交接台账 §4：走项目 venv 的 python，
+或把 `UV_CACHE_DIR` / `UV_TOOL_DIR` 指进工作区。这是环境限制，不是代码问题；
+未把"跳过"当"通过"报。
+
 ## [0.1.0] - 2026-09-14（第四轮 · 接手复核：三个真问题）
 
 接手时的基线是"五门全绿、132 passed"。复核后确认三处真问题——**其中两处让"全绿"这件事本身

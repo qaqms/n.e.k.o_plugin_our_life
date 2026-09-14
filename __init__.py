@@ -259,9 +259,12 @@ class OurLifePlugin(NekoPluginBase):
         snapshot = state.snapshot_for_panel(now=now)
         return Ok(
             {
-                "note": "stats_loaded",
+                # 通道缺席时如实回码：数值只在内存里、重启就丢，别让面板装作一切正常。
+                # `dashboard_context` 会把同一个码放进 `error_code`，面板据此显示横幅。
+                "note": "stats_loaded" if self._store.store_available else "store_unavailable",
                 "lanlan": lanlan,
                 "enabled": self._settings.enabled,
+                "store_available": self._store.store_available,
                 **snapshot,
             }
         )
@@ -304,7 +307,14 @@ class OurLifePlugin(NekoPluginBase):
         state = await self._load_for_read(lanlan)
         state.stats = state.stats.with_value(stat, clamp_value(float(value)))
         await self._store.save(state, now=time.time())
-        return Ok({"note": "stat_updated", "stat": stat, "value": round(getattr(state.stats, stat), 2)})
+        return Ok(
+            {
+                "note": "stat_updated" if self._store.store_available else "store_unavailable",
+                "store_available": self._store.store_available,
+                "stat": stat,
+                "value": round(getattr(state.stats, stat), 2),
+            }
+        )
 
     @ui.action(
         id="reset",
@@ -325,7 +335,13 @@ class OurLifePlugin(NekoPluginBase):
         now = time.time()
         fresh = ShardState(lanlan=lanlan, last_decay_at=now, updated_at=now)
         await self._store.save(fresh, now=now)
-        return Ok({"note": "stats_reset", "lanlan": lanlan})
+        return Ok(
+            {
+                "note": "stats_reset" if self._store.store_available else "store_unavailable",
+                "store_available": self._store.store_available,
+                "lanlan": lanlan,
+            }
+        )
 
     @ui.action(
         id="switch",
@@ -352,6 +368,14 @@ class OurLifePlugin(NekoPluginBase):
     async def switch_entry(self, enabled: bool = False, **kwargs: Any):
         if not isinstance(enabled, bool):
             return Err(SdkError("invalid_value"))
+        if not self._store.store_available:
+            # 这里**刻意不改语义**：总开关走的是配置层（`self.config.set`），
+            # 与数据 store 是两条独立通道，用 store 缺席与否去挡开关会是误报。
+            # 但这条信号本身值得留痕（装配异常的一条线索），所以只记日志。
+            self.logger.warning(
+                "store channel is absent while toggling [our_life].enabled; "
+                "the switch still goes through the config channel"
+            )
         try:
             await self.config.set("our_life.enabled", bool(enabled))
         except Exception:
@@ -374,7 +398,7 @@ class OurLifePlugin(NekoPluginBase):
             "enabled": self._settings.enabled,
             "lanlan": lanlan,
             "shards": list(self._store.known_lanlans()),
-            "store_available": getattr(self, "store", None) is not None,
+            "store_available": self._store.store_available,
             "config": {
                 "tick_seconds": self._settings.tick_seconds,
                 "mood_tau_hours": self._settings.decay.mood_tau_hours,
@@ -398,6 +422,11 @@ class OurLifePlugin(NekoPluginBase):
         payload["state"] = state.snapshot_for_panel(now=now)
         payload["recent_injections"] = [dict(item) for item in state.inject_history[-8:]]
         payload["hours"] = list(state.hour_histogram)
+        if not self._store.store_available:
+            # 面板据此显示横幅：数值只在内存里、重启就丢。
+            # 注意它**不报**"`get`/`set` 返回 Err"那种瞬时降级——那是本插件的既定容错契约
+            # （`services/state.py` 模块 docstring），把瞬时故障当"不可用"会让横幅一直挂着。
+            payload["error_code"] = "store_unavailable"
         return payload
 
     # ------------------------------------------------------------------
