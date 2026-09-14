@@ -1,0 +1,122 @@
+[plugin]
+id = "our_life"
+name = "我们的生活"
+description = "养成系陪伴：为猫娘维护好感度 / 心情 / 健康三项随真实时间演化的状态，以她自己的身心感受强注入对话上下文。日常互动会喂养数值，长期冷落则拟真衰减，掉到生病 / 闹脾气档时她会主动开口。"
+short_description = "养成系数值：好感度 / 心情 / 健康随时间真实演化并注入她的身心感受"
+keywords = [
+    "养成",
+    "好感度",
+    "心情",
+    "健康",
+    "陪伴",
+    "数值",
+    "affection",
+    "mood",
+    "health",
+    "raising",
+    "tamagotchi",
+    "care",
+]
+version = "0.1.0"
+type = "plugin"
+entry = "plugin.plugins.our_life:OurLifePlugin"
+
+[plugin.author]
+name = "qaqms"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin.i18n]
+default_locale = "zh-CN"
+locales_dir = "i18n"
+
+[plugin.store]
+# 数值 / 时间戳 / 连续天数必须持久化。
+# 注意：enabled = false 时 PluginStore 会「静默」失效——set 返回 Ok 却不落盘、get 返回默认值，
+# 不会报错，所以这里必须保持 true（见 DESIGN.md 已知陷阱 §4）。
+enabled = true
+
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.panel]]
+id = "main"
+title = "我们的生活"
+entry = "ui/panel.tsx"
+context = "dashboard"
+# state:read 读数值快照；config:read 读当前配置形状；action:call 才能点按钮。
+# 权限按最小必要声明：本面板不需要 config:write（写配置统一走 entry → self.config.set）。
+permissions = ["state:read", "config:read", "action:call"]
+
+[plugin_runtime]
+enabled = true
+# 随宿主自动启动：状态要靠后台 tick 采样行为并结算衰减，不自动启动就永远不会演化。
+# 知情同意由总开关 [our_life].enabled = false（fail-closed）保证——未显式打开前
+# 不注入、不结算、不推送，只空转采样。
+auto_start = true
+
+# ---------------------------------------------------------------------------
+# 业务配置
+# 这里的值是「默认值」；用户在 <用户数据根>/plugins/our_life/config/plugin.toml 里的覆盖层
+# 优先。config.example.toml 是同一份形状的镜像（那份不含任何 [plugin*] 表）。
+# 分档阈值不在此暴露：它们固定在 core/model.py 常量里作为单一来源，避免配置漂移。
+# ---------------------------------------------------------------------------
+
+[our_life]
+# fail-closed 总开关：false = 完全冻结（不注入、不结算衰减、不推送），数值原样保留。
+enabled = false
+# 后台 tick 间隔（秒）。负责行为采样 + 惰性衰减结算 + 注入判定。
+tick_seconds = 30
+
+[our_life.decay]
+# 心情：小时级。向静息基线回落（高于基线降、低于基线回升），不是一路掉到 0。
+mood_tau_hours = 3.0
+mood_rest_baseline = 55.0
+# 健康：天级。同样向静息基线回落；长期冷落会额外扣（见 neglect）。
+health_tau_hours = 36.0
+health_rest_baseline = 70.0
+# 好感：周级。只缓慢回落、不自动回升——它只靠互动长（见 growth）。
+affection_tau_days = 45.0
+
+[our_life.growth]
+# 每次用户发言：心情 +2.5 / 健康 +0.8 / 好感 +0.35。
+# 同一会话内第 n 次发言按 1/(1+n*session_diminish) 递减，避免"连发刷数值"。
+turn_mood_gain = 2.5
+turn_health_gain = 0.8
+turn_affection_gain = 0.35
+session_diminish = 0.15
+# 跨天首次互动（连续天数续上）：一次性给得更多。
+day_greet_mood = 8.0
+day_greet_health = 2.0
+day_greet_affection = 3.0
+# 连续互动天数里程碑：到达即额外奖励，每个里程碑只给一次（里程碑值随状态持久化）。
+streak_milestones = [3, 7, 14, 30]
+streak_affection_bonus = [5.0, 8.0, 12.0, 20.0]
+streak_mood_bonus = [10.0, 10.0, 15.0, 20.0]
+
+[our_life.neglect]
+# 冷落惩罚（拟真、惩罚式）：超过 grace_hours 没互动，按天扣，各自有上限，
+# 避免"一个月没来直接清零"这种不可逆体验。
+grace_hours = 24.0
+mood_penalty_per_day = 6.0
+health_penalty_per_day = 4.0
+affection_penalty_per_day = 2.0
+mood_penalty_cap = 25.0
+health_penalty_cap = 20.0
+affection_penalty_cap = 12.0
+
+[our_life.inject]
+# 强注入的三重频控：距上次注入至少 min_interval_sec；每小时最多 max_per_hour 次；
+# 注入正文最多 max_chars 字符（防 prompt 膨胀）。
+min_interval_sec = 1200
+max_per_hour = 3
+max_chars = 320
+# 分档「向下」跨越到危机档时，升级为 ai_behavior="respond"，让她主动开口；
+# 其余跨越一律 ai_behavior="read"（进上下文但不打断）。
+respond_on_crisis = true
+crisis_mood_tier = "sulking"
+crisis_health_tier = "sick"
+# 她主动「索取陪伴」LLM 工具的冷却（秒）。
+company_cooldown_sec = 7200

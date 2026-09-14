@@ -1,0 +1,69 @@
+# 运行时配置模板 / Runtime config template
+#
+# 本文件只展示「用户可以覆盖的形状」，不含任何 [plugin*] 表（校验会报 error）。
+# N.E.K.O 首次需要运行配置时会把本文件复制到用户数据目录：
+#   <用户数据根>/plugins/our_life/config/plugin.toml
+# 已存在则不覆盖；用户改过的键作为覆盖层叠加在 plugin.toml 的默认值之上。
+#
+# 存储根默认位置：Windows %LOCALAPPDATA%\N.E.K.O，macOS ~/Library/Application Support/N.E.K.O，
+# Linux $XDG_DATA_HOME/N.E.K.O（或 ~/.local/share/N.E.K.O）。
+
+[plugin_runtime]
+enabled = true
+# 随宿主自动启动：状态靠后台 tick 演化。真正是否生效由下面的 [our_life].enabled 决定。
+auto_start = true
+
+[our_life]
+# fail-closed 总开关。false = 完全冻结：不注入、不结算衰减、不推送，数值原样保留。
+# 打开后插件才开始「过日子」。
+enabled = false
+# 后台 tick 间隔（秒）：行为采样 + 惰性衰减结算 + 注入判定。
+tick_seconds = 30
+
+[our_life.decay]
+# 时间常数（越大掉得越慢）。心情小时级、健康天级、好感周级。
+mood_tau_hours = 3.0
+# 心情静息基线：高于它回落、低于它回升（不会一路归零）。
+mood_rest_baseline = 55.0
+health_tau_hours = 36.0
+health_rest_baseline = 70.0
+# 好感只缓慢回落、不自动回升——它只能靠互动长。
+affection_tau_days = 45.0
+
+[our_life.growth]
+# 每次用户发言的成长步长；同一会话内递减（session_diminish 控制递减强度）。
+turn_mood_gain = 2.5
+turn_health_gain = 0.8
+turn_affection_gain = 0.35
+session_diminish = 0.15
+# 跨天首次互动的一次性礼物。
+day_greet_mood = 8.0
+day_greet_health = 2.0
+day_greet_affection = 3.0
+# 连续互动天数里程碑（每个只结算一次）。
+streak_milestones = [3, 7, 14, 30]
+streak_affection_bonus = [5.0, 8.0, 12.0, 20.0]
+streak_mood_bonus = [10.0, 10.0, 15.0, 20.0]
+
+[our_life.neglect]
+# 冷落惩罚：超过 grace_hours 没互动后按天扣，且各有上限（不做不可逆清零）。
+grace_hours = 24.0
+mood_penalty_per_day = 6.0
+health_penalty_per_day = 4.0
+affection_penalty_per_day = 2.0
+mood_penalty_cap = 25.0
+health_penalty_cap = 20.0
+affection_penalty_cap = 12.0
+
+[our_life.inject]
+# 强注入频控：距上次注入至少 min_interval_sec，每小时最多 max_per_hour 次，
+# 正文最多 max_chars 字符。调大这些值 = 更安静的陪伴。
+min_interval_sec = 1200
+max_per_hour = 3
+max_chars = 320
+# 掉到危机档时是否让她主动开口（ai_behavior="respond"）。
+respond_on_crisis = true
+crisis_mood_tier = "sulking"
+crisis_health_tier = "sick"
+# 她主动索取陪伴的冷却（秒）。
+company_cooldown_sec = 7200

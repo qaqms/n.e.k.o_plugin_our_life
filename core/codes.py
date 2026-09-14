@@ -1,0 +1,55 @@
+"""稳定错误码 / 事件码常量。
+
+契约（沿用仓库既有惯例，见 `.agent/skills/neko-plugin/references/core-plugin-contract.md` 与
+forever_companion 台账第九轮结论）：
+
+- 面板可达入口返回的 `Err(SdkError(code))` 与 `note` 字段**只允许稳定 ASCII 码**，
+  形态 `^[a-z][a-z0-9_]*$`；动态细节（数值、角色名、异常文本）一律进日志，不进文案。
+- 前端 `ui/utils.ts` 的 `errorText()` 按 `panel.errors.<camelCase(码)>` 翻译；
+  非码文本（宿主自身错误 / 超时）原样直出。
+- 因此：**新增码必须同时**出现在本模块的 `PANEL_ERROR_CODES` 与两份 i18n 的
+  `panel.errors.*` 里，由 `tests/test_i18n_contract.py` 的码↔键同步门守住。
+
+EXEMPT: 开发者面向的调试入口与给模型的行为指令（本插件暂无）不走面板 toast 通路。
+"""
+
+from __future__ import annotations
+
+import re
+
+__all__ = ["CODE_PATTERN", "PANEL_ERROR_CODES", "is_panel_code", "camel_case"]
+
+# 面板可达入口可见的稳定码集合（保持 ASCII、语义自明）。
+PANEL_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        # 总开关 / 状态
+        "not_enabled",  # 总开关关闭：数值冻结中
+        "enabled",  # 总开关已打开
+        "disabled",  # 总开关已关闭
+        "stats_loaded",  # 查询成功（成功档也用码，前端按码渲染 toast）
+        "stat_updated",  # 手动纠偏成功
+        "stats_reset",  # 重置成功
+        # 参数非法
+        "invalid_stat",  # 未知数值名
+        "invalid_value",  # 数值不是 0..100 的数字
+        "invalid_lanlan",  # 角色标识为空 / 非法
+        # 运行时故障
+        "store_unavailable",  # PluginStore 不可用（未启用或通道故障）
+        "config_unavailable",  # 配置不可读
+        # 「索取陪伴」工具冷却
+        "company_cooldown",  # 冷却中，还没到可以撒娇的时机
+    }
+)
+
+CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def is_panel_code(value: str) -> bool:
+    """码形门：面板可见文案必须是稳定 ASCII 码。"""
+    return bool(CODE_PATTERN.match(value))
+
+
+def camel_case(code: str) -> str:
+    """`not_enabled` → `notEnabled`（与前端 `panel.errors.<camelCase>` 对齐）。"""
+    head, *tail = code.split("_")
+    return head + "".join(part[:1].upper() + part[1:] for part in tail)
