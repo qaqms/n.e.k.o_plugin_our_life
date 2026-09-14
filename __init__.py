@@ -80,7 +80,7 @@ from .core import (
     satiety_per_day,
     streak_milestone_bonus,
 )
-from .services import BehaviorSampler, Injector, ShardState, StateStore, day_number_for
+from .services import BehaviorSampler, Injector, ShardState, StateStore, ToolWatch, day_number_for
 
 # 真实节奏由配置 `[our_life].tick_seconds` 决定；装饰器的 seconds 必须是**字面量正整数**
 # （校验器静态检查 Name 节点会拒），所以这里钉 30 秒当"心跳上限"，
@@ -104,6 +104,10 @@ class OurLifePlugin(NekoPluginBase):
         self._store = StateStore(self, logger=self.logger)
         self._sampler = BehaviorSampler(self, logger=self.logger)
         self._injector = Injector(self, logger=self.logger)
+        # 工具注册心跳（v0.5.0）：@llm_tool 只在启动时发一次 IPC，main_server 没就绪
+        # 或重启后她的三个工具会静默缺席（见 services/tool_watch.py 模块 docstring）。
+        # 与总开关无关：注册韧性是宿主层面的在场性，不随业务冻结而应冻结。
+        self._tool_watch = ToolWatch(self, logger=self.logger)
         self._last_tick_at = 0.0
         self._tick_count = 0
         # 面板焦点分片（v0.4.2）：多角色卡时"面板到底看哪张卡"的唯一信号。
@@ -193,6 +197,13 @@ class OurLifePlugin(NekoPluginBase):
             return Ok({"skipped": True})
         self._last_tick_at = now
         self._tick_count += 1
+
+        # 每拍都递一下心跳器，内部按 300s 自节流；单独兜异常——巡检坏掉不许
+        # 把行为采样 / 衰减结算一起拖下水（tool_watch 自己也不炸，这是双保险）。
+        try:
+            await self._tool_watch.maybe_run(now=now)
+        except Exception:
+            self.logger.warning("our_life tool watch leaked", exc_info=True)
 
         try:
             records = await self._sampler.fetch()

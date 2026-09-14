@@ -27,7 +27,9 @@
 
 ## Package Type and Capabilities
 
-- package type: `plugin`（独立功能，**完全独立**：不调用任何其它插件、不联网、不改宿主平台层）
+- package type: `plugin`（独立功能，**完全独立**：不调用任何其它插件、无外网、不改宿主平台层；
+  v0.5.0 起含一发宿主回环只读在位性查询 `GET /api/tools`——官方 tool-calling.md 钦定的
+  工具注册 resilience 模式，属"文档承诺面"，不是私有端点）
 - capabilities:
   - callable entries：状态查询 / 手动纠偏 / 重置 / 总开关 / 照顾她（用物品）/ 商店购买 /
     金币补贴 / **口粮顾问**（她每天吃多少、还够几天、缺口多少）
@@ -140,6 +142,27 @@ v0.1.0（首版）：
 5. LLM 工具两个：她查询自身状态、她主动索取陪伴（带冷却）
 6. fail-closed 总开关 `[our_life].enabled = false`（默认关：未打开前不注入、不结算、不推送）
 7. 中英 i18n、`tests/` 数值门 + i18n 契约门、`tools/release_gate.py` 五门
+
+## v0.5.0 Scope（工具注册心跳：她的判断通道不再静默缺席，第十四轮）
+
+1. **`services/tool_watch.py`（新）**：挂在 `on_tick` 上的低频巡检器，每 300s 回环
+   `GET /api/tools`（stdlib urllib + `to_thread`，超时 4s），比对 `list_llm_tools()`
+   声明面与实际在位集合，缺席者逐个重发 `LLM_TOOL_REGISTER`（宿主 replace 语义、幂等）。
+2. **三条纪律**：main_server 不可达时**不盲挂**（只推进时钟等下轮，不追打也不每拍轰）；
+   补挂走 `_notify_llm_tool_registered` 重发而非公开 `register_llm_tool` 重调
+   （后者撞 `EntryConflictError`；unregister→register 有本地已删远端未挂的窗口）；
+   认不出的响应形状按"全场无工具"处理（宁可幂等重发，不可漏挂）。
+3. **永不连坐**：巡检器自己的异常全部内部消化（`watch_failed` 状态），`on_tick` 里再套
+   一层双保险——心跳坏掉不许把行为采样 / 衰减结算拖下水。
+4. **首拍即查**（`_last_run_at=0`）：竞态窗口要的是早发现；`no_tools` 不推进时钟，
+   工具收集齐后下一拍立刻核对。与总开关无关：注册韧性是宿主层面的在场性，不随业务冻结。
+5. **门**：`tests/test_tool_watch.py` 12 条——形状差集（嵌套/平铺/认不出/空声明）、
+   间隔自节流、no_tools 不推钟、不可达零补挂且推钟、点名只补缺席者、
+   单名失败不连坐、protected 面缺席整体降级、fetch 异常吞掉。
+
+刻意不做：把间隔进配置（心跳参数不是行为参数）；面板暴露心跳状态（它健康的表现就是
+"没有状态"）；给 `@llm_tool` 装饰器层做自动重试（那是宿主的事，插件侧只保证自己
+声明过的工具最终在场）。
 
 ## v0.4.5 Scope（禁用按钮光标：not-allowed，第十三轮）
 
@@ -326,7 +349,8 @@ WebSocket/推送式面板同步（宿主 context 模型是拉式，不自造通�
 8. **`data/` 与 `cache/` 才是可写位置**：`self.plugin_dir`（= `config_dir` 别名）是只读安装目录。
 9. **隐私**：注入正文含用户互动信息，只进总线不进日志正文；涉及原文一律不上 `logger`。
 10. **`@llm_tool` 名称**必须匹配 `^[A-Za-z0-9_.\-]{1,64}$`，且工具注册表在 `main_server` 内存里，
-    宿主重启即丢、无自动重注册——首版不额外做重注册心跳（记为待办），并在 README 说明。
+    宿主重启即丢、无自动重注册——v0.5.0 起由 `services/tool_watch.py` 心跳兜住
+    （回环 `GET /api/tools` 核实 + 缺席重发，官方 tool-calling.md 钦定模式）。
 11. **挂载态目录名必须等于 entry 的包名**（宿主源码核实）。两段链：
     - `plugin/server/application/plugins/lifecycle_service.py:1078-1091` 先调
       `normalize_plugin_entry_point(...)`，再调 `describe_plugin_entry_directory_mismatch(...)`，
@@ -364,7 +388,10 @@ WebSocket/推送式面板同步（宿主 context 模型是拉式，不自造通�
 - **惩罚式衰减的用户体验**：拟真衰减会让长期不互动明显掉档。默认 `enabled = false` 是唯一知情同意闸门；
   README 必须写清"关掉即冻结、不结算不衰减"，且面板要显示"当前是否在结算"。
 - **私有依赖面**：本版**不依赖**任何宿主内部端点，只依赖 `plugin.sdk.plugin` 公共门面与 `bus` 只读快照；
-  若后续要用 `/api/emotion/analysis`，需按台账惯例单列"无版本承诺面"债务。
+  v0.5.0 新增的唯一例外是回环只读 `GET /api/tools`（在位性查询，官方 `docs/zh-CN/plugins/tool-calling.md`
+  明文钦定的 resilience 模式——**文档承诺面**，随宿主文档版本演进）；补挂动作走 SDK 基类的
+  `_notify_llm_tool_registered`（protected 面，`getattr` 守卫，缺席时降级为"心跳失效"）。
+  若后续要用 `/api/emotion/analysis`，仍需按台账惯例单列"无版本承诺面"债务。
 - **prompt 膨胀**：注入受 `max_chars`(320) + `min_interval_sec`(1200) + `max_per_hour`(3) 三重约束；
   注入文案不含数值表以外的长文本，且不做每轮注入。
 - **跨环境双态验证**：常驻门必须区分独立仓态与宿主挂载态（CI 是 `cp -R` 进 `plugin/plugins/our_life`
@@ -385,6 +412,6 @@ WebSocket/推送式面板同步（宿主 context 模型是拉式，不自造通�
   注意它与 v0.3.0 的反馈闭环**不是同一件事**：后者是**她自己**回传感受，
   前者是插件去读对话正文推情绪（会碰隐私边界，故单独立项）。
 - 作息推断精细化（当前是固定睡眠窗 + 互动时段分布）
-- `@llm_tool` 重注册心跳：宿主 `main_server` 注册失败时只 warning 且不重试
-  （`plugin/server/messaging/llm_tool_registry.py`），所以她在"宿主起得比插件晚"的那次启动里
-  会暂时没有判断工具。当前靠重载插件恢复，值得做一条自愈通道。
+- ~~`@llm_tool` 重注册心跳~~（**已完成，v0.5.0**）：`services/tool_watch.py` 每 5 分钟回环
+  `GET /api/tools` 核实在位性、缺席点名重发 IPC；"宿主起得比插件晚"的那次启动
+  最迟 5 分钟内自愈，不再需要重载插件。

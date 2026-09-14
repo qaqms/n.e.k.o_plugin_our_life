@@ -3,6 +3,37 @@
 本插件采用"轮次叙事"记录：每一轮写清**病因 / 做法 / 验证 / 测试数**，而不是只列增删。
 历史条目只追加、不改写。
 
+## [0.5.0] - 2026-09-14（第十四轮 · 工具注册心跳：她的判断通道不再静默缺席）
+
+### 病灶：一次启动竞态，她整场失忆（且无人知晓）
+
+三个 `@llm_tool`（feel / company / judge）只在插件启动时经宿主 IPC 注册进
+`main_server` 的内存注册表，**fire-and-forget**：那一刻 main_server 没就绪
+（"宿主起得比插件晚"）则宿主侧只 warning 不重试（`llm_tool_registry.py` 的 docstring
+自己写着 "The plugin can re-register later"——把债写给插件侧）；main_server 重启则注册表
+整体清空。两种时序下她都**静默失去**判断工具：数值、吃饭、注入全部照常，
+只有 v0.3.0 反馈闭环整条通道无声消失。`forever_companion` 的 host_coord（300s）
+已证明这条是承重结构而非可选优化。
+
+### 做法（官方钦定的 resilience 模式：docs/zh-CN/plugins/tool-calling.md）
+
+1. **`services/tool_watch.py`（新）**：挂在 `on_tick` 上的低频巡检器。每 300s 回环
+   `GET /api/tools`（stdlib urllib + `to_thread`，4s 超时，零第三方依赖），比对
+   公开面 `list_llm_tools()` 的声明与实际在位集合，缺席者逐个重发注册。
+2. **三条纪律**：不可达**不盲挂**（只等下轮，不追打）；补挂走 `_notify_llm_tool_registered`
+   重发（replace 幂等），不重调公开 `register_llm_tool`（撞 EntryConflict）也不走
+   unregister→register（有本地已删、远端未挂的窗口）；认不出的形状按"全场无工具"
+   处理——宁可幂等重发，不可漏挂。
+3. **永不连坐**：巡检异常全部内部消化，`on_tick` 再套一层双保险；首拍即查；
+   与总开关无关（注册韧性是宿主层面在场性，不随业务冻结）。
+
+### 验证
+
+`356 → 368 passed`（`tests/test_tool_watch.py` 新增 12 条：形状差集 / 自节流 /
+no_tools 不推钟 / 不可达零补挂 / 点名补缺席 / 单名失败不连坐 / protected 面缺席降级 /
+fetch 异常吞掉）；五门发版校验链全绿。README「不联网」声明相应精确化为
+「无外网 + 一发宿主回环只读在位性查询」。
+
 ## [0.4.5] - 2026-09-14（第十三轮 · 禁用按钮的光标：不是"处理中"，是"按不了"）
 
 ### 病灶：总开关关了，按钮却在"转圈圈"（真机反馈）

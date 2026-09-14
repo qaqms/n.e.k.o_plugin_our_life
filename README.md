@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | plugin_id | `our_life` |
-| 包类型 | `plugin`（完全独立：不调用其它插件、不联网、不改宿主） |
+| 包类型 | `plugin`（完全独立：不调用其它插件、无外网、不改宿主；仅一发宿主回环只读巡检 `GET /api/tools`，见 README「工具注册心跳」） |
 | 存储 | `PluginStore`，**按角色卡分片**（键 `ourlife@<角色名>`） |
 | UI | Hosted TSX 面板 `ui/panel.tsx` |
 | 默认状态 | **fail-closed：安装后总开关为关** |
@@ -247,7 +247,11 @@
 
 ## 隐私与安全
 
-- **不联网**：插件运行时不发起任何外部请求，不读宿主 `core_config.json`，不做数据出域。
+- **无外网**：插件运行时不发起任何外部请求，不读宿主 `core_config.json`，不做数据出域。
+  唯一的网络形态是 v0.5.0 的**工具注册心跳**：对本机回环 `127.0.0.1` 的宿主
+  `GET /api/tools` 只读在位性查询（官方 `docs/zh-CN/plugins/tool-calling.md`
+  「main_server 重启会发生什么」钦定的 resilience 模式；每 5 分钟最多一发，
+  只查名字在不在，不携带任何对话或数值内容）。
 - **不调用其它插件**：完全独立。
 - 行为数据只来自宿主只读总线 `bus.conversations`，且只消费 **4 个非正文字段**
   （`conversation_id` / `timestamp` / `lanlan_name` / `turn_type`）。记录里虽然有 `content`
@@ -264,11 +268,11 @@
   前者是插件**去读对话正文**推情绪，会碰隐私边界，所以单独立项。
 - **反馈闭环取决于 `@llm_tool` 注册成功**：工具的注册经宿主 IPC 转 `main_server` 的
   `/api/tools/register`，宿主在注册失败时**只打 warning 就放过去、且不重试**。
-  所以她在 `main_server` 起得比插件晚的那次启动里会暂时"没有判断工具"——
-  本插件不受影响（数值、吃饭、注入全部照常），只是那条回传通道缺席；
-  重载插件或重启宿主即可恢复。
+  v0.5.0 起本插件自带**工具注册心跳**：每 5 分钟回环 `GET /api/tools` 核对三个工具
+  是否在场，缺席就点名重发注册（官方 tool-calling 文档钦定的 resilience 模式；
+  重发走宿主 replace 语义、幂等）。main_server 不可达时心跳静默等待，不盲挂。
 - 「索取陪伴」等 LLM 工具的注册表在宿主 `main_server` 内存里，宿主重启即丢且宿主不自动重注册；
-  本版不做重注册心跳，重载插件即可恢复。
+  恢复通道就是上面这条心跳（最迟 5 分钟内自愈，无需重载插件）。
 - **面板没有图表组件**（Hosted UI Kit 无图表组件）：近期走势用字符画折线（`▁▂▃▄▅▆▇█`）呈现，
   每条注入带一份数值快照（`{at, stats}`，不含任何正文），只看最近 12 条注入点。
 - **她"吃了几餐"是按结算记账的**：关机期间不会补记账（数值照真实时间折算，但餐数统计只在运行时累计）。
@@ -380,7 +384,7 @@ From this plugin repository root / 在当前插件仓库根目录中 / このプ
 ```bash
 # ruff：加 --offline 让它走 uv 缓存，断网也能跑（版本必须与 CI 逐字一致）
 uvx --offline ruff==0.12.4 check --ignore-noqa --config ruff.toml .
-uv run python -m pytest tests -q          # 当前 356 passed（v0.4.5）
+uv run python -m pytest tests -q          # 当前 368 passed（v0.5.0）
 uv run --with pip --project "../N.E.K.O" neko-plugin sync . --clean
 uv run --project "../N.E.K.O" neko-plugin check .
 uv run --project "../N.E.K.O" neko-plugin check -r .
@@ -452,7 +456,7 @@ entry = "plugin.plugins.our_life:OurLifePlugin"
 - **生日**：需要"角色的生日"这个新配置面与用户真实输入，单独立轮（v0.4.0 刻意没把日历日期
   塞进事件层——那会让"事件"混进两种时间语义：档位跨越 vs 日历日期）。
 - 其余 6 语言 i18n（**键集一致门已有**，见 `tests/test_i18n_contract.py`，缺的只是那 6 份译文）
-- `@llm_tool` 重注册心跳：宿主注册失败只 warning 且不重试，"宿主起得比插件晚"那次启动
-  她会暂时没有判断工具
+- ~~`@llm_tool` 重注册心跳~~（**已完成，v0.5.0**）：`services/tool_watch.py` 每 5 分钟
+  回环核实在位性、缺席点名重发；"宿主起得比插件晚"的那次启动最迟 5 分钟内自愈
 - 情绪感知：以独立插件联动方式接入（需先确认后做）
 - 作息推断精细化（首版是固定睡眠窗 + 互动时段分布）

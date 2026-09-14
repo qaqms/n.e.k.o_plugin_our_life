@@ -20,10 +20,13 @@ from .state import (
     now_seconds,
     shard_key,
 )
+from .tool_watch import TOOL_WATCH_INTERVAL_SEC, ToolWatch
 
 __all__ = [
     "BehaviorSampler",
     "DRIFT_THRESHOLD",
+    "TOOL_WATCH_INTERVAL_SEC",
+    "ToolWatch",
     "INJECT_HISTORY_MAX",
     "JUDGMENT_HISTORY_MAX",
     "InjectionPlan",
