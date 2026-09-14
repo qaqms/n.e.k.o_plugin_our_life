@@ -71,6 +71,8 @@ class OurLifePlugin(NekoPluginBase):
         self._injector = Injector(self, logger=self.logger)
         self._last_tick_at = 0.0
         self._tick_count = 0
+        # 已经落过盘的分片（每个角色卡每进程只 bootstrap 一次，避免面板刷新写 store）
+        self._bootstrapped: set[str] = set()
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -82,6 +84,7 @@ class OurLifePlugin(NekoPluginBase):
         known = await self._store.list_persisted_lanlans()
         now = time.time()
         normalized = 0
+        self._bootstrapped.update(known)
         for lanlan in known:
             state = await self._store.load(lanlan, now=now)
             if not self._settings.enabled and state.last_decay_at != now:
@@ -139,6 +142,8 @@ class OurLifePlugin(NekoPluginBase):
             roles.update(self._sampler.discover_lanlans(records))
             if self._tick_count % _PERSISTED_RESCAN_EVERY == 1:
                 roles.update(await self._store.list_persisted_lanlans())
+            if not roles:
+                self._warn_no_roles(records)
             for lanlan in sorted(roles):
                 await self._settle(lanlan, records, now=now)
         except Exception:
@@ -245,8 +250,9 @@ class OurLifePlugin(NekoPluginBase):
         lanlan, error = await self._resolve_lanlan(kwargs)
         if error is not None:
             return error
-        state = await self._load_for_read(lanlan)
-        snapshot = state.snapshot_for_panel(now=time.time())
+        now = time.time()
+        state = await self._touch_shard(lanlan, now=now)
+        snapshot = state.snapshot_for_panel(now=now)
         return Ok(
             {
                 "note": "stats_loaded",
@@ -384,7 +390,7 @@ class OurLifePlugin(NekoPluginBase):
             payload["recent_injections"] = []
             payload["error_code"] = "invalid_lanlan"
             return payload
-        state = await self._load_for_read(lanlan)
+        state = await self._touch_shard(lanlan, now=now)
         payload["state"] = state.snapshot_for_panel(now=now)
         payload["recent_injections"] = [dict(item) for item in state.inject_history[-8:]]
         payload["hours"] = list(state.hour_histogram)
@@ -478,6 +484,39 @@ class OurLifePlugin(NekoPluginBase):
 
     async def _load_for_read(self, lanlan: str) -> ShardState:
         return await self._store.load(lanlan, now=time.time())
+
+    async def _touch_shard(self, lanlan: str, *, now: float) -> ShardState:
+        """把分片落盘一次（缺则创建），"读路径"也调用。
+
+        为什么读路径也要落盘：tick 是后台定时器、**没有 `_ctx`**，它只能靠
+        "已知分片 ∪ 总线记录里的角色名"决定该结算谁。冷装机上这两者都可能是空的
+        （总线记录若不带 `lanlan_name`），插件就会一直空转、数值永远不动。
+        面板/入口被碰过本身就是"这个角色卡在用"的信号，落一个默认分片，
+        tick 从此就有名单了。
+
+        每个角色卡每次进程生命周期内只落一次盘（`_bootstrapped`），
+        免得面板每次刷新都写一遍 store。
+        """
+        state = await self._store.load(lanlan, now=now)
+        if lanlan not in self._bootstrapped:
+            await self._store.save(state, now=now)
+            self._bootstrapped.add(lanlan)
+        return state
+
+    def _warn_no_roles(self, records: tuple[Any, ...]) -> None:
+        """空转诊断：告诉维护者"总线里看到了记录，但认不出属于哪个角色卡"。
+
+        只记录**键名**（不含任何值），避免把对话正文带进日志。
+        """
+        if not records or self._tick_count % _PERSISTED_RESCAN_EVERY != 1:
+            return
+        keys = sorted({str(key) for record in records[:5] for key in record})
+        self.logger.warning(
+            "our_life: no role resolved from bus conversations (%d records); "
+            "waiting for a panel/entry call to bootstrap a shard. record keys=%s",
+            len(records),
+            keys,
+        )
 
     async def _resolve_lanlan(
         self, kwargs: dict[str, Any], *, strict: bool = True

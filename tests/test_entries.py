@@ -296,6 +296,27 @@ def test_quiet_tier_change_does_not_speak(
         assert host.pushed[-1]["ai_behavior"] == "read"
 
 
+def test_status_bootstraps_a_shard_so_the_tick_has_a_role(make_plugin: Any, run_async: Any) -> None:
+    """冷启动关键路径：tick 是后台定时器、没有 `_ctx`，只能靠分片名单决定结算谁。
+
+    面板/入口被碰过就落一个默认分片，tick 从此有名单——否则冷装机上（总线记录若不带
+    角色名）插件会一直空转、数值永远不动。
+    """
+    plugin, host = make_plugin()
+    assert host.store.data == {}
+    run_async(plugin.status_entry(_ctx={"lanlan_name": "灵"}))
+    assert SHARD_KEY in host.store.data
+    assert plugin._bootstrapped == {"灵"}
+
+
+def test_bootstrap_overwrites_at_most_once_per_run(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin()
+    run_async(plugin.status_entry(_ctx={"lanlan_name": "灵"}))
+    host.store.data[SHARD_KEY]["stats"]["mood"] = 33.0  # 人为改一下：再 bootstrap 就会被覆盖
+    run_async(plugin.status_entry(_ctx={"lanlan_name": "灵"}))
+    assert host.store.data[SHARD_KEY]["stats"]["mood"] == 33.0
+
+
 # ---------------------------------------------------------------------------
 # 面板上下文
 # ---------------------------------------------------------------------------

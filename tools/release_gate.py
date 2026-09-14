@@ -80,8 +80,17 @@ def _binary(name: str) -> str:
 
 
 def _run(cmd: list[str], cwd: Path, *, timeout: float = 1800.0) -> tuple[bool, str]:
-    """跑一条子进程命令。stdout/stderr 必须钉 UTF-8（Windows GBK 码面会崩 reader 线程）。"""
+    """跑一条子进程命令。stdout/stderr 必须钉 UTF-8（Windows GBK 码面会崩 reader 线程）。
+
+    同时钉 `PYTHONDONTWRITEBYTECODE=1`：上游打包器的元数据探测会**以子进程 import 插件本体**，
+    而 import 的目标是"已经过滤完的暂存树"，CPython 于是把 `__pycache__/*.pyc` 写进 payload，
+    归档时一并入包（详见 `dist/upstream-issue-packager-pycache.md`：forever_companion v1.2.1
+    因此多出 21 个 .pyc、体积 +73%）。探测子进程继承本进程环境，所以在**调用侧**设这个变量
+    即可让产物干净，而且**不能事后删包里的 .pyc**——那会让 `metadata.toml` 里的 `payload.hash`
+    与实际内容不符，宿主导入时校验不过。
+    """
     started = time.monotonic()
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     try:
         proc = subprocess.run(
             cmd,
@@ -92,6 +101,7 @@ def _run(cmd: list[str], cwd: Path, *, timeout: float = 1800.0) -> tuple[bool, s
             errors="replace",
             timeout=timeout,
             shell=False,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return False, f"命令超时（>{timeout:.0f}s）：{' '.join(cmd)}"
