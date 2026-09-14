@@ -61,6 +61,12 @@ timer tick（默认 30s，无 watchdog：每拍自成一拍，不持有跨拍对
 - 衰减是**读数时惰性折算**（`exp(-Δt/τ)`），不依赖常驻循环，也不怕进程重启。
 - **分档阈值固定在 `core/model.py` 的常量**（单一来源），不暴露成配置项——避免"配置漂移"类回归。
 - 配置只露**行为旋钮**（衰减时间常数、成长步长、冷落惩罚、注入频控）。
+- **分档有两套读法，不许混用**（`core/model.py` 的模块 docstring 是权威说明）：
+  - `tier_of` / `tier_transitions` = 硬比较，**面板与"这数值算哪一档"用它**，忠实反映每个数值；
+  - `crosses_tier_boundary` / `eventful_tier_transitions` = **带 0.05 分迟滞**，
+    只给**注入判定**用。否则分界线上的亚分噪声会被当成跨档事件：默认好评 20.0 正好压着
+    stranger/acquainted 的线，第一拍 30 秒心跳就把它折成 19.9998，于是凭空发一条
+    `tier_change` 强注入（真机 store 里抓到过这条，见 CHANGELOG 对应轮次）。
 
 ## First Version Scope
 

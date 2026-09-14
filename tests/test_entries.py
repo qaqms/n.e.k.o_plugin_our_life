@@ -11,6 +11,8 @@ import time
 from typing import Any
 
 import pytest
+from our_life.core.configuration import DecaySettings
+from our_life.core.model import Stats, apply_decay, tier_transitions
 
 SHARD_KEY = "ourlife@灵"
 
@@ -294,6 +296,50 @@ def test_quiet_tier_change_does_not_speak(
 
     if host.pushed:
         assert host.pushed[-1]["ai_behavior"] == "read"
+
+
+def test_first_decay_tick_sends_nothing_when_nothing_really_happened(
+    make_plugin: Any, run_async: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真机复现门（集成层）：默认好评 20.0 压着分界线，第一拍衰减必须**不注入**。
+
+    这条门盯的是 `__init__.py` 的接线：模型层已经有了带迟滞的判据
+    （`eventful_tier_transitions`），但只要 tick 里还写着硬比较的 `tier_transitions`，
+    真机上就会在第一次心跳里凭空发一条 `tier_change`（真机 store 的 inject_history 里
+    躺着一条 `affection=stranger` 的 tier_change，就是这么来的）。
+
+    这里没有任何新互动（总线是空的），所以"有理由注入"只可能来自亚分噪声。
+    """
+    now = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    plugin, host = make_plugin(config=_cfg(enabled=True))  # 总线为空：没有新互动
+    # 默认数值原样落盘，`last_decay_at` 设在 30 秒前 —— 真机上那一拍正是这个间隔
+    host.store.data[SHARD_KEY] = _shard_payload(affection=20.0, now=now - 30.0)
+
+    run_async(plugin.on_startup())
+    run_async(plugin.on_tick())
+
+    payload = host.store.data[SHARD_KEY]
+    assert 19.99 < payload["stats"]["affection"] < 20.0  # 前提：确实被折过分界线一点点
+    assert host.pushed == [], "亚分噪声不该触发注入"
+    assert payload["inject_history"] == [], "注入历史里不该有记录"
+    assert payload["inject_timestamps"] == []
+
+
+def test_first_decay_tick_would_inject_with_a_hard_comparison(
+    make_plugin: Any, run_async: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上一条门的前提校验：这一拍**确实**把数值折过了分界线。
+
+    把判据换回硬比较（`core.model.tier_transitions`）就能看出档位"变了"——
+    这正是修复前真机 store 里那条 `tier_change` 的来源。两条门合起来才说明
+    "接线用的是带迟滞的判据，而不是硬比较"。
+    """
+    before = Stats(affection=20.0)
+    after = apply_decay(before, elapsed_hours=30.0 / 3600.0, decay=DecaySettings())
+    assert before.affection == 20.0
+    assert after.affection < 20.0
+    assert tier_transitions(before, after) == (("affection", "acquainted", "stranger"),)
 
 
 def test_status_bootstraps_a_shard_so_the_tick_has_a_role(make_plugin: Any, run_async: Any) -> None:

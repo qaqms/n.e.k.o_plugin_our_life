@@ -36,6 +36,10 @@
 - **冷落**：超过 `grace_hours`（默认 24h）没互动后按天扣，三项各自有上限（心情最多 −25、
   健康 −20、好感 −12）。
 - 分档阈值固定在 `core/model.py` 的 `TIER_BOUNDS`，**不作为配置项暴露**（单一来源，避免配置漂移）。
+- **分档有两套读法**：面板与"这数值算哪一档"走硬比较（`tier_of`）；
+  只有**注入判定**走带 0.05 分迟滞的 `eventful_tier_transitions`。
+  原因是默认好评 `20.0` 正好压着 stranger/acquainted 的分界线，硬比较会让**第一拍 30 秒心跳**
+  的亚分衰减（→ 19.9998）就触发一次 `tier_change` 强注入，而面板上什么都没变。
 
 ## 强注入
 
@@ -159,6 +163,20 @@
    而 `bus` 是只读 property；`tests/conftest.py` 因此**无条件**桩掉 `plugin.sdk.plugin`，
    让独立仓态与挂载态行为一致——否则"本地全绿、CI 全红"。
    这正是 `release` 门存在的意义（它真的 `cp` 进宿主仓按裸 id 跑 `check -r`）。
+10. **发版链自己的 stdout 也会崩**（第四轮真机实测）：Windows 上 `sys.stdout.encoding` 是
+    **活动代码页**（GBK），**被重定向时也一样**——`print("全链通过 ✅")` 直接抛
+    `UnicodeEncodeError`，于是"门全 OK、脚本却退 1"，看起来像插件坏了。
+    `tools/release_gate.py` 现在按"是否 tty"兜住：重定向重配 UTF-8，真控制台只降 `errors=replace`；
+    子进程另用 `PYTHONIOENCODING=utf-8` 钉死。有常驻门（`tests/test_chain_hygiene.py`）守着。
+11. **发版链不许依赖网络**（同一轮）：门里原本写 `uvx ruff==<钉住版本>`，而 `uvx` 每次都会去
+    PyPI 解析一次——断网时它先红，**后面三门连跑都跑不到**，报告指向错误的方向。
+    现在离线优先（uv 缓存命中即跑，版本仍与 CI 逐字一致），缓存未命中才联网；
+    绝不用 PATH 上版本未知的 `ruff` 顶包（要顶必须先核对版本）。
+12. **分界线上的亚分噪声会被硬比较当成事件**（同一轮，真机 store 里抓到）：默认好评 20.0 正好
+    压在分界线上，第一拍 30 秒衰减（→ 19.9998）就发一条 `tier_change` 强注入。
+    分档因此有**两套读法**：面板 `tier_of` 用硬比较，注入判定
+    `eventful_tier_transitions` 用 0.05 分迟滞。混用任何一套都会回到老 bug。
+
 
 ## 发版校验（五门）
 
@@ -173,6 +191,10 @@ uv run python tools/release_gate.py --host-root "D:/other/N.E.K.O"
 
 `release` 门会**真的**把插件挂载到 `<宿主>/plugin/plugins/our_life/` 再按**裸 id** 跑
 `check -r`，复刻市场 verify workflow 的形态（独立仓本地全绿 ≠ CI 绿）。
+
+整条链**不需要联网**（ruff 走 uv 缓存的离线解析）；也不要求你先 `chcp 65001`——
+脚本自己会把被重定向的 stdout 重配成 UTF-8（否则它会在"打印结果"这一步崩掉，见坑位存档 §10）。
+用 `--only pytest,ruff` 可以只跑子集，`--keep` 保留宿主仓副本便于反复迭代。
 
 ## Development
 
@@ -195,12 +217,17 @@ n.e.k.o_plugin_our_life
 From this plugin repository root / 在当前插件仓库根目录中 / このプラグインリポジトリのルートで：
 
 ```bash
-uvx ruff==0.12.4 check --ignore-noqa --config ruff.toml .
-uv run python -m pytest tests -q
+# ruff：加 --offline 让它走 uv 缓存，断网也能跑（版本必须与 CI 逐字一致）
+uvx --offline ruff==0.12.4 check --ignore-noqa --config ruff.toml .
+uv run python -m pytest tests -q          # 当前 148 passed
 uv run --with pip --project "../N.E.K.O" neko-plugin sync . --clean
 uv run --project "../N.E.K.O" neko-plugin check .
 uv run --project "../N.E.K.O" neko-plugin check -r .
 ```
+
+> `release_gate.py` 里的 ruff 门用的是**内置的、与 CI 逐字相同的参数**
+> （`--isolated` / `--target-version py311` / `--line-length 120` / `--select E4,E7,E9,F,I`），
+> 上面那条手跑命令只是等价的简写；要复刻 CI 请直接用 `release_gate.py`。
 
 Python runtime dependencies are declared in `pyproject.toml` and synced into
 `vendor/` for packaging. The generated `vendor/` directory is not committed;

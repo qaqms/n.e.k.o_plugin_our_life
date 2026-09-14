@@ -10,6 +10,15 @@
 
 分档阈值固定在 `TIER_BOUNDS`（单一来源，不进配置），档名是稳定 ASCII 键：
 面向用户的档名走 i18n（`panel.tier.<stat>.<tier>`），面向模型的档名走 `core/injection.py`。
+
+**两套分档读法，别混用**：
+
+- `tier_of` / `tier_transitions`：硬比较（`value >= lower`），面板与"数值到底算哪一档"
+  的忠实读法，必须原样反映每一个数值。
+- `crosses_tier_boundary` / `eventful_tier_transitions`：**带迟滞**（`TIER_CROSSING_MARGIN`），
+  只给**注入判定**用。分界线上会自然出现亚分噪声（默认好评 20.0 正好压着
+  stranger/acquainted 的线，第一拍衰减就把它翻过去），硬比较会把这种噪声也当成"跨档事件"
+  而白送一次强注入——详见 `TIER_CROSSING_MARGIN` 的病因记录。
 """
 
 from __future__ import annotations
@@ -29,6 +38,7 @@ __all__ = [
     "MOOD_TIERS",
     "STAT_NAMES",
     "TIER_BOUNDS",
+    "TIER_CROSSING_MARGIN",
     "Stats",
     "advance_streak",
     "apply_day_greet",
@@ -37,6 +47,8 @@ __all__ = [
     "apply_streak_bonus",
     "apply_turn_gain",
     "clamp_value",
+    "crosses_tier_boundary",
+    "eventful_tier_transitions",
     "is_crisis",
     "neglect_entitlement_days",
     "streak_milestone_bonus",
@@ -50,6 +62,19 @@ MAX_VALUE = 100.0
 
 # 分档下界（升序）：0-19 / 20-39 / 40-59 / 60-79 / 80-100
 TIER_BOUNDS = (0.0, 20.0, 40.0, 60.0, 80.0)
+
+# 判定「档位真的变了」所需的迟滞余量（见 `crosses_tier_boundary`）。
+#
+# 病因（真机 store 里实测到的）：默认好评 20.0 **正好压在** stranger/acquainted 的分界线上，
+# 只要落一个 30 秒的心跳，`apply_decay` 就把它折成 19.9998456796——分档是
+# `value >= lower` 的硬比较，于是档位"变了"，`tier_change` 注入立刻触发。
+# 面板显示 20.0、注入里却写着"关系档位刚刚变了"，用户看不到任何变化。
+# 健康（τ=36h）与心情（τ=3h）同样会在各自的边界上出现这种亚分翻档。
+#
+# 为什么是 0.05：面板数值只显示一位小数，越界不足 0.05 时用户读到的数值与档名都没变，
+# 对模型也就没有信息量；而它远小于任何一个真实变化（心情走完 **1 分**约需 2400 秒）——
+# 迟滞只把真跨越推迟十几秒到几十秒，语义无损。
+TIER_CROSSING_MARGIN = 0.05
 
 AFFECTION_TIERS = ("stranger", "acquainted", "close", "intimate", "bonded")
 MOOD_TIERS = ("sulking", "low", "calm", "happy", "elated")
@@ -133,6 +158,77 @@ def tier_transitions(before: Stats, after: Stats) -> tuple[tuple[str, str, str],
     for name in STAT_NAMES:
         old_tier = tier_of(name, getattr(before, name))
         new_tier = tier_of(name, getattr(after, name))
+        if old_tier != new_tier:
+            out.append((name, old_tier, new_tier))
+    return tuple(out)
+
+
+def crosses_tier_boundary(
+    stat: str, *, before: float, after: float, margin: float = TIER_CROSSING_MARGIN
+) -> bool:
+    """档位是否"真的"变了——**带迟滞**的比较，而不是硬比较。
+
+    算法（`before` → `after` 是时间上相邻的两点）：
+
+    1. 硬比较认为**没变** ⇒ 直接返回 False（绝大多数拍走这条）。
+    2. 硬比较认为变了，但两点是**同一条分界线**两侧 `margin` 内的邻居 ⇒ 判为**亚分噪声**，返回 False。
+    3. 其余情况 ⇒ 真跨档。
+
+    第 2 条正是"迟滞"：每条分界线两侧各留一条 `margin` 宽的带子，两点都停在带内
+    （不论谁在线上、谁在线下）就按"还在原档"处理。0.05 分的带子用户读不出来
+    （面板只显示一位小数），心情走完它约需 24 秒、好感约需数月——
+    语义无损，但噪声不再被当成事件。
+
+    于是真机实测到的那对数值被吸收：
+
+    - `20.0 → 19.9998456796`：两点都停在 20.0 那条线的带内（真机 store 里抓到的那个）；
+    - `19.96 → 20.04`：同样是"贴着线抖"的一对邻居，也不会再被当成事件。
+
+    而真走了 1 分的 `20.0 → 19.0`（面板上档名确实变了）照旧判为跨档。
+
+    与 `tier_transitions`（面板 / 原始语义用，必须对每个数值忠实反映）分开，是因为硬比较
+    会把第一种判成跨档，于是每个衰减拍都白送一次 `tier_change` 强注入
+    （详见 `TIER_CROSSING_MARGIN` 的病因记录）。
+    """
+    old_value = clamp_value(before)
+    new_value = clamp_value(after)
+    old_index = tier_index_of(stat, old_value)
+    new_index = tier_index_of(stat, new_value)
+    if old_index == new_index:
+        return False
+    return not _inside_spanning_boundary_band(old_value, new_value, max(old_index, new_index), margin)
+
+
+def _inside_spanning_boundary_band(
+    old_value: float, new_value: float, upper_index: int, margin: float
+) -> bool:
+    """两点是否都停在**它们之间那条分界线**的 `margin` 带内（= 亚分噪声）。
+
+    两点的下标不同，落点又紧贴它们中间那条线，跨越就只是噪声；否则算真事件。
+    带子锚定在 `TIER_BOUNDS[upper_index]`——即两个下标中较高的那个所指的分界线，
+    也就是两点**之间**那条线（两点跨过多条线时它取较高者，此时距离必然远大于 `margin`，
+    于是照旧判为真事件）。
+    """
+    if margin <= 0.0:
+        return False
+    boundary = TIER_BOUNDS[upper_index]
+    return abs(old_value - boundary) < margin and abs(new_value - boundary) < margin
+
+
+def eventful_tier_transitions(before: "Stats", after: "Stats") -> tuple[tuple[str, str, str], ...]:
+    """只保留**真事件**的跨档（噪声级的边界翻档被丢掉）。
+
+    返回形状与 `tier_transitions` 一致 `(轴, 旧档, 新档)`；档名按**真实数值**取，
+    所以注入文案里的档名与面板显示的始终一致。
+    """
+    out: list[tuple[str, str, str]] = []
+    for name in STAT_NAMES:
+        old_value = getattr(before, name)
+        new_value = getattr(after, name)
+        if not crosses_tier_boundary(name, before=old_value, after=new_value):
+            continue
+        old_tier = tier_of(name, old_value)
+        new_tier = tier_of(name, new_value)
         if old_tier != new_tier:
             out.append((name, old_tier, new_tier))
     return tuple(out)

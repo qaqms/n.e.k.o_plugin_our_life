@@ -13,6 +13,8 @@ from our_life.core.model import (
     HEALTH_TIERS,
     MOOD_TIERS,
     STAT_NAMES,
+    TIER_BOUNDS,
+    TIER_CROSSING_MARGIN,
     Stats,
     advance_streak,
     apply_day_greet,
@@ -21,6 +23,8 @@ from our_life.core.model import (
     apply_streak_bonus,
     apply_turn_gain,
     clamp_value,
+    crosses_tier_boundary,
+    eventful_tier_transitions,
     is_crisis,
     neglect_entitlement_days,
     streak_milestone_bonus,
@@ -215,3 +219,91 @@ def test_tier_transitions_detects_crossings_only() -> None:
     assert ("mood", "calm", "happy") in transitions
     assert all(item[0] != "health" for item in transitions)
     assert tier_transitions(before, before) == ()
+
+
+# ---------------------------------------------------------------------------
+# 分界噪声（真机 store 里抓到的那一类）
+# ---------------------------------------------------------------------------
+#
+# 病因：分档线是 `value >= lower` 的硬比较，而默认好评 20.0 **正好压在**
+# stranger/acquainted 的线上。落一个 30 秒心跳，`apply_decay` 就把它折成 19.9998456796，
+# 于是"跨档"成立、`tier_change` 强注入立刻发出——面板上数值还是 20.0，用户看不到任何变化。
+# 这一组门盯的就是"注入判据不许被亚分噪声触发，但真变化照旧触发"。
+
+
+def test_default_affection_sits_exactly_on_a_tier_boundary() -> None:
+    """前提门：这条噪声不是巧合，默认值就落在分界线上。
+
+    哪天有人把默认值挪开了，本组门里"真机复现"那条会失去意义——所以把前提也钉住，
+    让挪默认值的人顺手看到这里。
+    """
+    default_affection = Stats().affection
+    assert default_affection in TIER_BOUNDS
+    assert tier_of("affection", default_affection) != tier_of("affection", default_affection - 1e-6)
+
+
+def test_crosses_tier_boundary_ignores_noise_but_keeps_real_crossings() -> None:
+    # 噪声：0.0002 分的翻档（真机 store 里逐字抓到的前后两点）
+    assert not crosses_tier_boundary("affection", before=20.0, after=19.9998456796)
+    assert not crosses_tier_boundary("affection", before=20.0001, after=19.9999)
+    # 噪声：两点都紧贴同一条分界线、只是分处两侧（会来回抖的那种）
+    assert not crosses_tier_boundary("affection", before=19.96, after=20.04)
+    assert not crosses_tier_boundary("mood", before=60.03, after=59.97)
+    # 非跨档：同一档内部的往复
+    assert not crosses_tier_boundary("mood", before=25.0, after=23.0)
+    # 真变化：离分界线远得多，档位确实变了（面板上的档名也变了）
+    assert crosses_tier_boundary("affection", before=20.0, after=19.0)
+    assert crosses_tier_boundary("affection", before=19.9, after=20.2)
+    assert crosses_tier_boundary("mood", before=59.9, after=61.0)
+    assert crosses_tier_boundary("health", before=31.0, after=18.0)
+    # 一次跨两档：离中间那条线必然很远，照样判出来
+    assert crosses_tier_boundary("mood", before=39.0, after=61.0)
+
+
+def test_hysteresis_is_bounded_by_the_margin() -> None:
+    """迟滞不能变成"永远不判跨档"：离开分界线超过余量就必须判出来。"""
+    for lower in TIER_BOUNDS[1:]:
+        assert crosses_tier_boundary(
+            "affection", before=lower, after=lower - TIER_CROSSING_MARGIN - 0.01
+        ), f"越界 {lower} 超过余量仍未判为跨档"
+        assert crosses_tier_boundary(
+            "affection", before=lower - 1.0, after=lower + 1.0
+        ), f"跨越 {lower} 一分以上仍未判为跨档"
+
+
+def test_real_machine_defect_is_gone() -> None:
+    """真机复现门：把 store 里那对数值喂进两条判据，硬比较会红、事件判据必须干净。
+
+    这条门就是把"曾经在真机 store 里发生过的一次错误注入"钉在墙上——
+    修复前 `eventful_tier_transitions` 会返回一条 `tier_change`，注入随即发出。
+    """
+    decay = DecaySettings()
+    before = Stats()
+    after = apply_decay(before, elapsed_hours=30.0 / 3600.0, decay=decay)
+
+    # 前提：这一拍确实把值折过了分界线（否则本条门白测）
+    assert tier_transitions(before, after) != ()
+    assert tier_of("affection", before.affection) != tier_of("affection", after.affection)
+
+    # 但注入判据必须认为"什么都没发生"
+    assert eventful_tier_transitions(before, after) == ()
+    assert not crosses_tier_boundary(
+        "affection", before=before.affection, after=after.affection
+    )
+
+
+def test_eventful_transitions_keeps_only_the_real_crossing() -> None:
+    # 心情真的跨了一档（59→61 是 calm→happy）；好感只是被衰减推过分界线一点点
+    before = Stats(affection=20.0, mood=59.0, health=70.0)
+    after = Stats(affection=19.9998456796, mood=61.0, health=70.0)
+    assert eventful_tier_transitions(before, after) == (("mood", "calm", "happy"),)
+
+
+def test_eventful_transitions_reuses_the_plain_tier_names() -> None:
+    before = Stats(affection=20.0, mood=59.0, health=70.0)
+    after = Stats(affection=19.0, mood=61.0, health=70.0)
+    eventful = eventful_tier_transitions(before, after)
+    assert eventful == (("affection", "acquainted", "stranger"), ("mood", "calm", "happy"))
+    for stat, old_tier, new_tier in eventful:
+        assert old_tier == tier_of(stat, getattr(before, stat))
+        assert new_tier == tier_of(stat, getattr(after, stat))

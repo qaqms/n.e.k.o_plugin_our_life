@@ -43,10 +43,10 @@ from .core import (
     apply_turn_gain,
     build_text,
     clamp_value,
+    eventful_tier_transitions,
     local_day,
     neglect_entitlement_days,
     streak_milestone_bonus,
-    tier_transitions,
 )
 from .services import BehaviorSampler, Injector, ShardState, StateStore
 
@@ -207,7 +207,11 @@ class OurLifePlugin(NekoPluginBase):
             stats = apply_neglect(stats, delta_days=delta_days, neglect=settings.neglect)
             state.neglect_days_applied = entitlement
 
-        transitions = tier_transitions(before_stats, stats)
+        # 跨档判据用 `eventful_tier_transitions`（带 0.05 分迟滞），不是硬比较的
+        # `tier_transitions`：默认好评 20.0 正好压着 stranger/acquainted 的分界线，
+        # 硬比较会把第一拍的 19.9998456796 判成跨档，白送一次 tier_change 强注入
+        # （真机 store 里抓到过，详见 core/model.py 的 TIER_CROSSING_MARGIN）。
+        transitions = eventful_tier_transitions(before_stats, stats)
         state.stats = stats
         state.last_decay_at = now
         state.apply_summary(summary)
