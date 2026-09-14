@@ -6,7 +6,7 @@
 2. **码↔键同步门**：每个码都要有 `panel.errors.<camelCase>` 键（反向也要：不能有孤立键）。
 3. **成功档同步门**：入口返回的 note 码也要有 `panel.msg.<camelCase>` 键。
 4. **键集一致门**：两种语言的键集必须完全相同。
-5. **引用面门**：`ui/panel.tsx` 里 `t("字面量")` 与 `__init__.py` 里 `tr("字面量")` 引用的键都必须存在。
+5. **引用面门**：`ui/**`（v0.6.0 拆分后含骨架与组件）里 `t("字面量")` 与 `__init__.py` 里 `tr("字面量")` 引用的键都必须存在。
 6. **结构门**：动态拼接族（tier / trigger）必须逐项存在——拼接键不在引用面门的覆盖面内。
 """
 
@@ -143,7 +143,10 @@ def test_locale_values_are_non_empty() -> None:
 
 
 def test_tsx_referenced_keys_exist() -> None:
-    source = (ROOT / "ui" / "panel.tsx").read_text(encoding="utf-8")
+    # v0.6.0 拆分：引用面扩到整个 ui/**（骨架 + shared + components）。
+    source = "\n".join(
+        file.read_text(encoding="utf-8") for file in sorted((ROOT / "ui").rglob("*.tsx"))
+    )
     keys = _flatten_keys(source, RE_T_LITERAL)
     assert keys, "expected the panel to reference i18n literals"
     for locale in LOCALES:

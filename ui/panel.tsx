@@ -1,4 +1,5 @@
-// Hosted TSX 面板：只从 `@neko/plugin-ui` 导入，业务逻辑全在 Python 侧。
+// Hosted TSX 面板骨架：只从 `@neko/plugin-ui` 与 `./shared` / `./components/**` 导入，
+// 业务逻辑全在 Python 侧。
 //
 // 契约要点（照 `plugin/sdk/hosted-ui/index.d.ts` 的精确签名写，不照文档猜）：
 // - `Grid` 的列数是 `cols`（不是 columns）；`Select` / `NumberInput` **没有** `label`，要包 `Field`；
@@ -8,16 +9,15 @@
 // - 检查器是**文本级**规则：文件里出现"全局门面对象"的裸标识符形态就会被拒收，
 //   所以一律写完整的 `props.api` 成员访问（连注释也不例外）。
 //
-// 布局（v0.4.1 重构，替代旧的"一条道滑到底"）：
-// - **顶部状态带**：五轴进度条 + 今日事实徽章（第几天 / 连续天数 / 时段 / 睡眠 / 危机）+ 总开关，
-//   滚到任何角落她当前的状态都一眼可见；
-// - **Tabs 四页**：总览（走势 + 相处节律）/ 过日子（口粮顾问 + 商店 + 背包）/
-//   她的世界（她自己的感受 + 她经历过什么）/ 管理（纠偏 + 近期注入 + 配置）。
-//   Tab 激活态由 kit 的 `useLocalState("tabs:<id>")` 持久化，刷新上下文不丢位置。
-// - **自动刷新（v0.4.3）**：状态带里的手动「刷新」按钮已退役，面板每 10s 自动拉一次
-//   context（带防重入 / 后台暂停 / 回可见补拉三条性能闸门），见 Panel 内注释。
-// - **动作后即时刷新（v0.4.4）**：kit 只对 ActionButton/ActionForm 兑现 refresh_context，
-//   本面板全走普通 Button——run() 成功后自己调 refreshContext（与轮询共用单飞通道）。
+// 布局（v0.4.1 制结构 → v0.6.0 内容细化）：
+// - **顶部状态带**（v0.4.1，保留）：五轴进度条 + 今日事实徽章 + 总开关，滚到哪都可见；
+// - **Tabs 四页**：总览（今日带 + 五轴卡 + 作息条）/ 过日子（口粮顾问 + 商店 + 背包卡）/
+//   她的世界（判断 + 经历时间线）/ 管理（纠偏 + 近期注入 + 配置）。
+// - **文件拆分（v0.6.0）**：可视模块拆到 `ui/components/**`，类型与纯函数在 `ui/shared.tsx`；
+//   本文件只留骨架、动作通道（run/refreshContext）与状态带。
+// - **自动刷新（v0.4.3）+ 动作后即时刷新（v0.4.4）**：每 10s 单飞合并拉一次 context；
+//   kit 只对 ActionButton/ActionForm 兑现 refresh_context，本面板全走普通 Button——
+//   run() 成功后自己调 refreshContext（与轮询共用单飞通道）。
 import {
   Alert,
   Button,
@@ -47,192 +47,33 @@ import {
   useRef,
   useToast,
 } from "@neko/plugin-ui"
-import type { PluginSurfaceProps } from "@neko/plugin-ui"
+import {
+  STAT_KEYS,
+  camel,
+  envelopeResult,
+  errorText,
+  formatTime,
+} from "./shared"
+import type { InjectionRecord, JudgmentRecord, PanelProps, ShopEntry } from "./shared"
+import { AxisCards } from "./components/axis_cards"
+import { Bag } from "./components/bag"
+import { DayBand } from "./components/day_band"
+import { RhythmBar } from "./components/rhythm_bar"
+import { Timeline } from "./components/timeline"
 
-type ShardSnapshot = {
-  lanlan?: string
-  affection?: number
-  mood?: number
-  health?: number
-  satiety?: number
-  energy?: number
-  tiers?: Record<string, string>
-  streak_days?: number
-  day_number?: number
-  last_touch_at?: number | null
-  gap_hours?: number | null
-  last_inject_at?: number | null
-  inject_count_24h?: number
-  sodas?: number
-  daily_spent?: number
-  meals_total?: number
-  meals_today?: number
-  last_meal_at?: number | null
-  sleeping?: boolean
-  inventory?: Record<string, number>
-}
-
-type InjectionRecord = {
-  at?: number
-  trigger?: string
-  summary?: string
-  stats?: Record<string, number>
-}
-
-type RhythmView = {
-  phase?: string
-  sleeping?: boolean
-  minutes_to_boundary?: number
-  per_day_decay?: number
-}
-
-type AdvisorView = {
-  meal_need_per_day?: number
-  observed_meals_per_day?: number
-  meals_per_day?: number
-  stock_meals?: number
-  days_remaining?: number | null
-  horizon_days?: number
-  shortfall_meals?: number
-  suggested_purchase?: number
-  suggested_cost?: number
-  affordable?: boolean
-  urgent?: boolean
-  empty?: boolean
-}
-
-type JudgmentRecord = {
-  at?: number
-  label?: string
-  applied?: number
-}
-
-type FeedbackView = {
-  enabled?: boolean
-  daily_add_points?: number
-  daily_subtract_points?: number
-  used_add?: number
-  used_subtract?: number
-  remaining_add?: number
-  remaining_subtract?: number
-  count_today?: number
-  last_judgment_at?: number | null
-  history?: JudgmentRecord[]
-}
-
-type RuntimeView = {
-  rhythm?: Record<string, any>
-  phase?: string
-  sleeping?: boolean
-  minutes_to_boundary?: number
-  per_day_decay?: number
-  advisor?: AdvisorView
-  crisis?: boolean
-  crisis_axes?: string[]
-  day_number?: number
-  anniversary?: { kind?: string; day_number?: number; years?: number } | null
-  feedback?: FeedbackView
-}
-
-type ShopEntry = {
-  id?: string
-  kind?: string
-  cost?: number
-  food?: boolean
-  carry_max?: number
-  effects?: [string, number][]
-}
-
-/**
- * 她经历过什么（v0.4.0 阶段性事件）。
- * 只带事件名 / 轴 / 时刻与数值快照——台账里本来就没有任何对话正文（见 core/events.py）。
- */
-type EventRecord = {
-  key?: string
-  stat?: string
-  value?: number
-  width?: number
-  at?: number
-  [key: string]: unknown
-}
-
-type State = {
-  enabled?: boolean
-  lanlan?: string
-  shards?: string[]
-  store_available?: boolean
-  config?: Record<string, any>
-  shop?: ShopEntry[]
-  state?: ShardSnapshot | null
-  runtime?: RuntimeView
-  recent_injections?: InjectionRecord[]
-  recent_events?: EventRecord[]
-  trend?: InjectionRecord[]
-  hours?: number[]
-  meal_days?: [string, number][]
-  error_code?: string
-}
-
-const STAT_KEYS = ["energy", "satiety", "mood", "health", "affection"] as const
-
-// 禁用态光标覆盖（v0.4.5）：kit 的 `.neko-button:disabled` 样式是 `cursor: wait`
-//（宿主 ui-kit/styles.css，转圈“等待”光标），但“总开关关了”只是**按不了**、
-// 不是“处理中”——鼠标一放上去就转圈，读起来像按钮在忙。平台层 CSS 只读，
+// 禁用态光标覆盖（v0.4.5）+ 作息条格样式（v0.6.0）：kit 的 `.neko-button:disabled` 是
+// `cursor: wait`（转圈"等待"），而我们的禁用只是"总开关没开、按不了"。平台层 CSS 只读，
 // 这里用面板级 <style> 覆盖：同特异度后来者赢，kit 样式表必然先于面板内联样式入文档。
-const PANEL_STYLE_OVERRIDES = ".neko-button:disabled { cursor: not-allowed; }"
+const PANEL_STYLE_OVERRIDES =
+  ".neko-button:disabled { cursor: not-allowed; }" +
+  " .our-life-hour { display: inline-block; min-width: 13px; text-align: center; border-radius: 3px; }" +
+  " .our-life-hour-sleep { background: rgba(125, 125, 160, 0.28); }" +
+  " .our-life-hour-now { outline: 1px solid currentColor; }"
 
 // 自动轮询节奏（v0.4.3）：见 Panel 内「自动刷新」注释段的三条性能闸门论证。
 const AUTO_REFRESH_MS = 10000
-const TREND_LEVELS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
 
-function camel(code: string): string {
-  return code
-    .split("_")
-    .filter(Boolean)
-    .map((part, index) => (index === 0 ? part : part.charAt(0).toUpperCase() + part.slice(1)))
-    .join("")
-}
-
-/** 把后端抛出的东西翻成用户能读的一句话：稳定码走 i18n，其它原样直出。 */
-function errorText(error: unknown, t: (key: string, params?: Record<string, any>) => string): string {
-  const raw = error instanceof Error ? error.message : String(error ?? "")
-  if (/^[a-z][a-z0-9_]*$/.test(raw)) {
-    return t(`panel.errors.${camel(raw)}`, { defaultValue: raw })
-  }
-  return raw
-}
-
-function envelopeResult(envelope: any): any {
-  return envelope && typeof envelope === "object" && "result" in envelope ? envelope.result : envelope
-}
-
-function formatTime(seconds?: number | null, fallback?: string): string {
-  if (!seconds) return fallback ?? ""
-  const date = new Date(seconds * 1000)
-  if (Number.isNaN(date.getTime())) return fallback ?? ""
-  return date.toLocaleString()
-}
-
-function formatGap(hours: number | null | undefined, t: (k: string, p?: Record<string, any>) => string): string {
-  if (hours === null || hours === undefined) return t("panel.never")
-  if (hours < 1) return t("panel.gapMinutes", { minutes: Math.max(1, Math.round(hours * 60)) })
-  if (hours < 24) return t("panel.gapHours", { hours: Math.round(hours) })
-  return t("panel.gapDays", { days: Math.floor(hours / 24) })
-}
-
-/** 把 0..100 的数值映射成一格字符，用于 CSS/字符画走势（Hosted UI Kit 没有图表组件）。 */
-function sparkline(values: number[]): string {
-  if (values.length === 0) return ""
-  return values
-    .map((value) => {
-      const clamped = Math.max(0, Math.min(100, Number(value)))
-      const index = Math.min(TREND_LEVELS.length - 1, Math.floor((clamped / 100) * TREND_LEVELS.length))
-      return TREND_LEVELS[index]
-    })
-    .join("")
-}
-
-export default function Panel(props: PluginSurfaceProps<State>) {
+export default function Panel(props: PanelProps) {
   // 注意：**不要**从 props 里解构出那个"调用门面"的短名字——hosted-tsx 检查器是
   // 文本级规则（连注释都不跳过），一旦文件里出现它的裸标识符形态就会被判成
   // "用了全局对象"而拒收（catgirl_seiyuu 台账里踩过同一个坑）。
@@ -244,12 +85,11 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   const [tuneValue, setTuneValue] = useLocalState<number | "">("our_life.tune.value", 50)
   const [buyItem, setBuyItem] = useLocalState<string>("our_life.buy.item", "meat")
   const [buyQuantity, setBuyQuantity] = useLocalState<number | "">("our_life.buy.quantity", 3)
-  const [careItem, setCareItem] = useLocalState<string>("our_life.care.item", "meat")
 
   const snapshot = state?.state ?? null
   const runtime = state?.runtime ?? {}
   const advisor = runtime.advisor ?? {}
-  const feedback: FeedbackView = runtime.feedback ?? {}
+  const feedback: any = runtime.feedback ?? {}
   const judgmentHistory = feedback.history ?? []
   const eventHistory = state?.recent_events ?? []
   const enabled = state?.enabled === true
@@ -257,12 +97,13 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   const tiers = snapshot?.tiers ?? {}
   const inventory = snapshot?.inventory ?? {}
   const catalog = state?.shop ?? []
+  const axes = state?.axes ?? {}
   const sleeping = runtime.sleeping ?? snapshot?.sleeping ?? false
 
   // context 拉取的唯一通道（v0.4.4）：轮询与动作后的即时刷新共用，单飞 + 尾随合并。
   // v0.4.3 的教训：`refresh_context=True` 只有 kit 的 ActionButton/ActionForm 会自动消费
-  // （宿主 ui-kit/runtime.js），本面板全部走普通 Button + props.api.call——
-  // 动作成功后没人重拉 context，金币/背包就会「后台已扣、前台不更新」。
+  // （宿主 ui-kit/runtime.js），本面板全部走普通 Button —— 动作成功后没人重拉 context，
+  // 金币/背包就会「后台已扣、前台不更新」。
   // 合并而非排队：同一时刻最多一个在途请求 + 一次尾随补拉，慢机器也不叠请求。
   const refreshBusy = useRef(false)
   const refreshRerun = useRef(false)
@@ -339,8 +180,9 @@ export default function Panel(props: PluginSurfaceProps<State>) {
     }
   }
 
-  const care = async () => {
-    const result = await run("feed", { item: careItem })
+  // 背包卡的「给她」直达按钮（v0.6.0）：旧版"下拉选中→再按照顾"的两步流砍成一步。
+  const giveItem = async (itemId: string) => {
+    const result = await run("feed", { item: itemId })
     if (dismissResult(result)) return
     if (result?.note === "care_applied") {
       toast.success(t("panel.msg.careApplied"))
@@ -408,18 +250,21 @@ export default function Panel(props: PluginSurfaceProps<State>) {
     value: String(entry.id ?? ""),
     label: t(`panel.item.${entry.id ?? "unknown"}`, { defaultValue: String(entry.id ?? "-") }),
   }))
-  const affordableItems = catalogItems.filter((entry) => (inventory[entry.value] ?? 0) > 0)
 
   const hours = state?.hours ?? []
-  const activeHours = hours
-    .map((count, hour) => ({ count, hour }))
-    .filter((item) => item.count > 0)
-    .sort((left, right) => right.count - left.count)
-    .slice(0, 6)
-
   const injections = state?.recent_injections ?? []
   const trend = state?.trend ?? []
   const trendPoints = (trend.length > 0 ? trend : injections.filter((row) => row.stats)).slice(-12)
+
+  // 每轴走势序列（v0.6.0）：走势卡被五轴卡吸收后，sparkline 数据按轴分发。
+  const sparks: Record<string, number[]> = {}
+  for (const key of STAT_KEYS) {
+    sparks[key] = trendPoints.map((row) => Number(row.stats?.[key] ?? 0))
+  }
+  const axisValues: Record<string, number> = {}
+  for (const key of STAT_KEYS) {
+    axisValues[key] = Number(snapshot?.[key] ?? 0)
+  }
 
   const crisisAxes = (runtime.crisis_axes ?? [])
     .map((axis) => t(`panel.stat.${axis}`, { defaultValue: axis }))
@@ -429,6 +274,16 @@ export default function Panel(props: PluginSurfaceProps<State>) {
     (entry.effects ?? [])
       .map(([name, delta]) => `${t(`panel.stat.${name}`, { defaultValue: name })} ${delta > 0 ? "+" : ""}${delta}`)
       .join(" · ")
+
+  // 背包卡的呈现数据（v0.6.0）：只有"在她手上"的物品进卡，顺序跟商店目录一致。
+  const bagItems = catalog
+    .filter((entry) => (inventory[String(entry.id ?? "")] ?? 0) > 0)
+    .map((entry) => ({
+      id: String(entry.id ?? ""),
+      label: t(`panel.item.${entry.id ?? "unknown"}`, { defaultValue: String(entry.id ?? "-") }),
+      count: inventory[String(entry.id ?? "")] ?? 0,
+      effects: t("panel.shopEffects", { effects: effectText(entry) }),
+    }))
 
   const daysRemaining = advisor.days_remaining
   const advisorLine =
@@ -464,72 +319,9 @@ export default function Panel(props: PluginSurfaceProps<State>) {
 
   const overviewTab = (
     <Stack gap={16}>
-      <Card title={t("panel.section.trend")}>
-        {trendPoints.length > 1 ? (
-          <Stack gap={8}>
-            {STAT_KEYS.map((key) => (
-              <Inline key={key} gap={12} align="center">
-                <Text>{`${t(`panel.stat.${key}`)}`}</Text>
-                <Text>{sparkline(trendPoints.map((row) => Number(row.stats?.[key] ?? 0)))}</Text>
-                <Text>{`${Number(trendPoints[trendPoints.length - 1]?.stats?.[key] ?? 0).toFixed(0)}`}</Text>
-              </Inline>
-            ))}
-          </Stack>
-        ) : (
-          <EmptyState title={t("panel.section.trend")} description={t("panel.trendHint")} />
-        )}
-      </Card>
-
-      <Card title={t("panel.section.rhythm")}>
-        <Stack gap={12}>
-          <KeyValue
-            items={[
-              { key: "lanlan", label: t("panel.field.lanlan"), value: snapshot?.lanlan ?? "-" },
-              {
-                key: "phase",
-                label: t("panel.field.phase"),
-                value: t(`panel.phase.${runtime.phase ?? "noon"}`, { defaultValue: runtime.phase ?? "-" }),
-              },
-              {
-                key: "boundary",
-                label: sleeping ? t("panel.field.boundaryWake") : t("panel.field.boundarySleep"),
-                value: String(runtime.minutes_to_boundary ?? 0),
-              },
-              { key: "dayNumber", label: t("panel.field.dayNumber"), value: String(runtime.day_number ?? 0) },
-              { key: "streak", label: t("panel.field.streak"), value: String(snapshot?.streak_days ?? 0) },
-              {
-                key: "anniversary",
-                label: t("panel.field.anniversary"),
-                value: runtime.anniversary
-                  ? runtime.anniversary.kind === "yearly"
-                    ? t("panel.anniversary.yearly", { years: runtime.anniversary.years ?? 1 })
-                    : t("panel.anniversary.milestone", { day: runtime.anniversary.day_number ?? 0 })
-                  : "-",
-              },
-              {
-                key: "last",
-                label: t("panel.field.lastTouch"),
-                value: formatTime(snapshot?.last_touch_at, t("panel.never")),
-              },
-              { key: "gap", label: t("panel.field.gap"), value: formatGap(snapshot?.gap_hours, t) },
-              {
-                key: "injects",
-                label: t("panel.field.inject24h"),
-                value: String(snapshot?.inject_count_24h ?? 0),
-              },
-            ]}
-          />
-          {activeHours.length > 0 ? (
-            <Inline gap={8} wrap>
-              {activeHours.map((item) => (
-                <Text key={item.hour}>{`${String(item.hour).padStart(2, "0")}:00 ×${item.count}`}</Text>
-              ))}
-            </Inline>
-          ) : (
-            <Text>{t("panel.hoursHint")}</Text>
-          )}
-        </Stack>
-      </Card>
+      <DayBand t={t} snapshot={snapshot} dayNumber={runtime.day_number} />
+      <AxisCards t={t} tiers={tiers} values={axisValues} axes={axes} sparks={sparks} />
+      <RhythmBar t={t} hours={hours} sleeping={sleeping} config={config} runtime={runtime} snapshot={snapshot} />
     </Stack>
   )
 
@@ -552,7 +344,6 @@ export default function Panel(props: PluginSurfaceProps<State>) {
           </Columns>
           <KeyValue
             items={[
-              { key: "sodas", label: t("panel.field.sodas"), value: String(snapshot?.sodas ?? 0) },
               { key: "spent", label: t("panel.field.dailySpent"), value: String(snapshot?.daily_spent ?? 0) },
               {
                 key: "need",
@@ -560,7 +351,6 @@ export default function Panel(props: PluginSurfaceProps<State>) {
                 value: t("panel.advisor.need", { meals: advisor.meals_per_day ?? 0 }),
               },
               { key: "stock", label: t("panel.field.staple"), value: advisorLine },
-              { key: "mealsToday", label: t("panel.field.mealsToday"), value: String(snapshot?.meals_today ?? 0) },
               { key: "mealsTotal", label: t("panel.field.mealsTotal"), value: String(snapshot?.meals_total ?? 0) },
               { key: "lastMeal", label: t("panel.field.lastMeal"), value: formatTime(snapshot?.last_meal_at, t("panel.never")) },
             ]}
@@ -625,37 +415,7 @@ export default function Panel(props: PluginSurfaceProps<State>) {
           </Stack>
         </Card>
 
-        <Card title={t("panel.section.bag")}>
-          <Stack gap={12}>
-            {affordableItems.length > 0 ? (
-              <KeyValue
-                items={affordableItems.map((entry) => ({
-                  key: entry.value,
-                  label: entry.label,
-                  value: String(inventory[entry.value] ?? 0),
-                }))}
-              />
-            ) : (
-              <EmptyState title={t("panel.section.bag")} description={t("panel.advisor.empty")} />
-            )}
-            {affordableItems.length > 0 ? (
-              <>
-                <Field label={t("fields.item")}>
-                  <Select
-                    value={careItem}
-                    options={affordableItems}
-                    onChange={(next: any) => setCareItem(String(next))}
-                  />
-                </Field>
-                <Inline gap={12}>
-                  <Button tone="primary" disabled={!enabled} onClick={care}>
-                    {t("actions.feed.label")}
-                  </Button>
-                </Inline>
-              </>
-            ) : null}
-          </Stack>
-        </Card>
+        <Bag t={t} items={bagItems} enabled={enabled} onGive={giveItem} />
       </Grid>
     </Stack>
   )
@@ -712,39 +472,7 @@ export default function Panel(props: PluginSurfaceProps<State>) {
         </Stack>
       </Card>
 
-      <Card title={t("panel.section.events")}>
-        {eventHistory.length > 0 ? (
-          <Stack gap={12}>
-            <DataTable
-              rowKey="at"
-              data={eventHistory}
-              emptyText={t("panel.noEvents")}
-              columns={[
-                {
-                  key: "at",
-                  label: t("panel.field.time"),
-                  render: (row: EventRecord) => formatTime(row.at, "-"),
-                },
-                {
-                  key: "key",
-                  label: t("panel.field.event"),
-                  render: (row: EventRecord) =>
-                    t(`panel.event.${row.key ?? "unknown"}`, { defaultValue: row.key ?? "-" }),
-                },
-                {
-                  key: "stat",
-                  label: t("panel.field.stat"),
-                  render: (row: EventRecord) =>
-                    t(`panel.stat.${row.stat ?? "unknown"}`, { defaultValue: row.stat ?? "-" }),
-                },
-              ]}
-            />
-            <Text>{t("panel.eventsHint")}</Text>
-          </Stack>
-        ) : (
-          <EmptyState title={t("panel.noEvents")} description={t("panel.noEventsHint")} />
-        )}
-      </Card>
+      <Timeline t={t} events={eventHistory} total={snapshot?.events?.total ?? eventHistory.length} />
     </Stack>
   )
 
@@ -849,8 +577,8 @@ export default function Panel(props: PluginSurfaceProps<State>) {
 
         {snapshot ? (
           <>
-            {/* 顶部状态带：滚到哪个标签页都能一眼看到她现在的样子。 */}
-            <Card title={t("panel.section.stats")}>
+            {/* 顶部状态带：滚到哪个标签页都能一眼看到她现在的样子（v0.4.1 真机成果，保留）。 */}
+            <Card title={t("panel.band.title")}>
               <Stack gap={12}>
                 <Inline gap={8} align="center" wrap>
                   <StatusBadge

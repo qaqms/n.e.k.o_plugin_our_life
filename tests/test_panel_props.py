@@ -5,11 +5,12 @@
 本机沙箱跑不了 `check-hosted-tsx` 与真实 `tsc`（那两门要求被检文件在宿主仓内），
 而**这类错误恰好是"本地全绿、用户看到烂面板"的那一类**——所以在这里补一道文本级门。
 
-门只覆盖 `ui/panel.tsx` 真正 import 了的组件，并且刻意排除合法使用同名 prop 的那些
+门覆盖 `ui/**`（骨架 + shared + components，v0.6.0 拆分后门只看主文件=给拆分留盲区：
+hosted-tsx 检查器是顺依赖发现的文件级扫描）真正 import 了的组件，并且刻意排除合法使用同名 prop 的那些
 （`Field` 与 `Switch` 的 `label` 是对的）。它不是 `tsc` 的替代品，而是"已知静默坑"的回归网：
 宿主升级把某个 prop 改名时，这条门会红，提醒去改面板而不是等用户反馈布局坏了。
 
-`ui/panel.tsx` 里的**注释**也在扫描范围内——这是刻意的：注释里写坏 props 会误导后来者，
+`ui/**` 里的**注释**也在扫描范围内（全部文件拼接后扫描）——这是刻意的：注释里写坏 props 会误导后来者，
 而且检查器本身也是文本级的（见 README 坑位 §8）。
 """
 
@@ -19,7 +20,8 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PANEL = ROOT / "ui" / "panel.tsx"
+UI_ROOT = ROOT / "ui"
+PANEL = UI_ROOT / "panel.tsx"
 
 # 组件 → 它**没有**的 prop（写在面板里会被静默丢弃）
 FORBIDDEN_PROPS: dict[str, tuple[str, ...]] = {
@@ -42,8 +44,16 @@ EXEMPT_COMPONENTS = frozenset({"Field", "Switch", "Checkbox", "Accordion"})
 IMPORT_RE = re.compile(r"import\s*\{([^}]*)\}\s*from\s*[\"']@neko/plugin-ui[\"']", re.S)
 
 
+def _ui_files() -> list[Path]:
+    """扫描面 = 整个 `ui/**`（骨架 → shared → components）：
+    hosted-tsx 检查器是顺依赖发现的**文件级**扫描（v0.6.0 拆分后门只看主文件=留盲区）。
+    固定顺序让门失败信息可复现。"""
+    files = [PANEL, UI_ROOT / "shared.tsx", *sorted((UI_ROOT / "components").glob("*.tsx"))]
+    return [file for file in files if file.is_file()]
+
+
 def _panel_source() -> str:
-    return PANEL.read_text(encoding="utf-8")
+    return "\n".join(file.read_text(encoding="utf-8") for file in _ui_files())
 
 
 def _imported_components(source: str) -> set[str]:
@@ -179,4 +189,60 @@ def test_panel_only_imports_from_the_kit_or_relative_paths() -> None:
     for module in modules:
         assert module.startswith(".") or module in {"@neko/plugin-ui", "neko:ui"}, (
             f"hosted TSX may not import {module!r}"
+        )
+
+
+def test_panel_is_split_into_shared_and_components() -> None:
+    """v0.6.0 拆分门：骨架只留骨架，可视模块各归各家，工具函数全仓只有一份。
+
+    拆分的理由（"空空的"病灶）在 CHANGELOG 第十四轮之后：区块焊在 900 行的单文件里
+    不等于信息密度——想细化一个区块先要敢改它。拆开后谁想把某个块搬回骨架
+    或者再造一份 sparkline/tierTone，这条门会问清楚。
+    """
+    skeleton = PANEL.read_text(encoding="utf-8")
+    for module in (
+        "./shared",
+        "./components/axis_cards",
+        "./components/day_band",
+        "./components/rhythm_bar",
+        "./components/bag",
+        "./components/timeline",
+    ):
+        assert f'from "{module}"' in skeleton, f"panel skeleton must import {module}"
+    # 工具函数只许住在 shared.tsx（对偶性纪律：两处需要的逻辑只写一遍）。
+    assert "function sparkline" not in skeleton, "helpers must live in ui/shared.tsx"
+    shared = (UI_ROOT / "shared.tsx").read_text(encoding="utf-8")
+    assert "function sparkline" in shared and "function hourBars" in shared
+
+
+def test_overview_tab_carries_the_detailed_blocks() -> None:
+    """v0.6.0 总览页门：今日带 + 五轴卡 + 作息条必须在；旧"孤立 KeyValue 墙"不回潮。
+
+    五轴卡的明细文案（距升档/今日变化）由 axis_cards 渲染；作息条的字符柱
+    依赖 hourBars 归一——这两处是本轮"把空的地方填上"的主体，拆掉任何一处
+    都等于退回 v0.5.x 的稀疏总览。
+    """
+    skeleton = PANEL.read_text(encoding="utf-8")
+    for element in ("<DayBand", "<AxisCards", "<RhythmBar", "<Timeline", "<Bag "):
+        assert element in skeleton, f"panel must mount {element}"
+    axis_cards = (UI_ROOT / "components" / "axis_cards.tsx").read_text(encoding="utf-8")
+    for key in ("panel.axis.toNext", "panel.axis.maxTier", "panel.axis.delta"):
+        assert f'"{key}"' in axis_cards, f"axis cards lost detail line {key}"
+    rhythm = (UI_ROOT / "components" / "rhythm_bar.tsx").read_text(encoding="utf-8")
+    assert "hourBars" in rhythm and "our-life-hour-sleep" in rhythm, (
+        "rhythm card must keep the 24-cell day bar with sleep shading"
+    )
+
+
+def test_axes_detail_labels_come_from_context_not_local_math() -> None:
+    """面板不做档位运算：距升档/今日变化只读 context 的 axes，不得在 TSX 里碰档位线。
+
+    档位线的唯一来源是 Python 的 `TIER_BOUNDS`（`core.model.axis_details` 现算）；
+    如果哪天有人在 TSX 里写 20/40/60/80 手算"还差多少分"，这条门红——那正是
+    "面板说还差 3 分、下一拍却升档了"的错位起源。
+    """
+    for file in _ui_files():
+        source = file.read_text(encoding="utf-8")
+        assert not re.search(r"\b(20|40|60|80)\.0\b", source), (
+            f"{file.name} hard-codes tier bounds; read them from context.axes"
         )

@@ -143,6 +143,29 @@ v0.1.0（首版）：
 6. fail-closed 总开关 `[our_life].enabled = false`（默认关：未打开前不注入、不结算、不推送）
 7. 中英 i18n、`tests/` 数值门 + i18n 契约门、`tools/release_gate.py` 五门
 
+## v0.6.0 Scope（面板细化：三层总览 + 七文件拆分，第十五轮）
+
+1. **总览页三层化**：今日事实带（五个 StatCard）/ 五轴卡（数值 + 档位徽章 + 字符走势柱
+   + 距下一档差 N 分 + 今日变化）/ 24 格作息条（小时柱 + 睡眠窗底色 + 此刻描边）。
+   旧走势卡与节律卡是**被吸收**：sparkline 进卡、activeHours 进柱、KeyValue 降为四行补充。
+2. **`axes` context 字段（本轮唯一 Python 数据面）**：`core.model.axis_details` 从
+   `TIER_BOUNDS` 现算 `to_next/next_tier`（判据线==档位线，与 v0.4.0 事件钉档位表同纪律）；
+   `_axis_view` 从 inject_history 挑**今日最早**快照做 `delta_today` 锚点，缺锚点返回
+   `None`（面板整行不渲染——拿 0 冒充"没变"是编数据）；脏 `at` 跳过不炸。TSX 侧
+   硬编码 20/40/60/80 有专门门拦。
+3. **背包物品卡**：只有"在她手上"的物品成卡，「给她」直达（砍"下拉选中→再按照顾"两步流）；
+   商店批量购买表单保留。组件不碰调用门面，动作一律回调上提（`Bag.onGive`）。
+4. **经历时间线**：每条挂"{stat} {value}（跨线 {width}）"——value/width 从调试数据变叙事。
+5. **文件拆分**：`ui/panel.tsx`（骨架）+ `ui/shared.tsx`（类型/纯函数，全仓唯一一份）+
+   `ui/components/{axis_cards,day_band,rhythm_bar,bag,timeline}.tsx`；面板门扫描面
+   扩到整个 `ui/**`（hosted-tsx 是顺依赖发现的文件级扫描，门只看主文件=留盲区）。
+6. **顺手拔定时炸弹**：判断族测试 `_enabled_config` 显式关 `quiet_during_sleep`——
+   默认睡眠窗把非危机注入整层抑制，端到端门到半夜变假红（未改动的 HEAD 在 00:10
+   实踩）；假红的门等于没有门，睡眠抑制另由 `test_injection.py` 专测。
+
+刻意不做：轴卡点击详情 Modal（下一轮候选）；新入口/新配置键（三处同源面零变动）；
+新动作；动 Tabs 四页骨架与顶部状态带（v0.4.1/v0.4.2 真机成果原样保留）。
+
 ## v0.5.0 Scope（工具注册心跳：她的判断通道不再静默缺席，第十四轮）
 
 1. **`services/tool_watch.py`（新）**：挂在 `on_tick` 上的低频巡检器，每 300s 回环
@@ -293,7 +316,9 @@ WebSocket/推送式面板同步（宿主 context 模型是拉式，不自造通�
 
 - plugin.toml sections: `[plugin]`、`[plugin.author]`、`[plugin.sdk]`、`[plugin.i18n]`、`[plugin.store]`、`[plugin.ui]` + `[[plugin.ui.panel]]`、`[plugin_runtime]`、自定义 `[our_life]` 族
 - SDK surfaces: `NekoPluginBase`、`@neko_plugin`、`@plugin_entry`、`@lifecycle`、`@timer_interval`、`@ui.context`、`@ui.action`、`@llm_tool`、`push_message`、`Ok/Err/SdkError`、`self.store`、`self.config`、`self.bus.conversations`
-- UI surfaces: hosted-tsx panel `ui/panel.tsx`，权限 `state:read` + `config:read` + `action:call`
+- UI surfaces: hosted-tsx panel `ui/panel.tsx`（v0.6.0 起：`ui/shared.tsx` + `ui/components/**`），
+  权限 `state:read` + `config:read` + `action:call`；context 额外字段 `axes`（五轴卡明细，
+  判据全部在 Python 侧现算）
 - state/config: `self.store` 存数值与时间戳；`self.config` 读 `[our_life]`；开关写入走 entry → `self.config.set`
 - lifecycle/background work: startup 装配采样状态；tick 内完成采样+结算+注入，**不持有跨拍对象**（timer 每拍新 event loop）
 - external integrations: 无（仅宿主本地 bus 只读）

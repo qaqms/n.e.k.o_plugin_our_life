@@ -62,6 +62,7 @@ __all__ = [
     "CouplingSignal",
     "Stats",
     "advance_streak",
+    "axis_details",
     "apply_anniversary",
     "apply_coupling",
     "apply_day_greet",
@@ -251,6 +252,38 @@ def tier_transitions(before: Stats, after: Stats) -> tuple[tuple[str, str, str],
         if old_tier != new_tier:
             out.append((name, old_tier, new_tier))
     return tuple(out)
+
+
+def axis_details(stats: Stats, *, day_start: Stats | None = None) -> dict[str, dict[str, Any]]:
+    """面板「五轴卡」的明细：当前值 / 档位 / 距升档 / 今日变化（v0.6.0）。
+
+    两条纪律（与 `core/events.py` 钉事件的同一来源）：
+
+    - **档位线只有一个来源**：`to_next` 直接由 `TIER_BOUNDS` 相减得到，面板上
+      "距下一档还差多少"与 `tier_of` 实际用的是同一条线——谁改了档位表，两处一起变，
+      不存在"显示说还差 3 分、下一拍却升档了"的错位。
+    - **没有锚点就说没有**：`delta_today` 只在调用方给出今日最早快照（`day_start`）时
+      才算；缺锚点返回 `None`，面板整行不渲染——拿 0 冒充"今天没变"是编数据。
+
+    `tier_index` / `next_tier` 是给面板查 `panel.tier.<stat>.<tier>` 用的稳定 ASCII 键；
+    面向用户的档名由 i18n 展开，这里不出现任何中文。
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for name in STAT_NAMES:
+        value = clamp_value(getattr(stats, name))
+        tiers = _TIERS[name]
+        index = tier_index_of(name, value)
+        at_top = index + 1 >= len(tiers)
+        day_value = getattr(day_start, name) if day_start is not None else None
+        out[name] = {
+            "value": round(value, 1),
+            "tier": tiers[index],
+            "tier_index": index,
+            "next_tier": None if at_top else tiers[index + 1],
+            "to_next": None if at_top else round(TIER_BOUNDS[index + 1] - value, 1),
+            "delta_today": None if day_value is None else round(value - day_value, 1),
+        }
+    return out
 
 
 def crosses_tier_boundary(

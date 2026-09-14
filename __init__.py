@@ -57,6 +57,7 @@ from .core import (
     apply_neglect,
     apply_streak_bonus,
     apply_turn_gain,
+    axis_details,
     build_text,
     bump_meal_day,
     clamp_value,
@@ -1026,6 +1027,7 @@ class OurLifePlugin(NekoPluginBase):
         state = await self._touch_shard(lanlan, now=now)
         payload["state"] = state.snapshot_for_panel(now=now)
         payload["runtime"] = await self._runtime_view(state, now=now)
+        payload["axes"] = _axis_view(state, now=now)
         payload["recent_injections"] = [dict(item) for item in state.inject_history[-8:]]
         # 她经历过的事（v0.4.0）：面板用它列"经历"。`snapshot_for_panel` 里也有一份
         # （上限 6 条、新的在前），这里再取一次是为了让面板拿到**比注入历史更长**的窗口——
@@ -1350,6 +1352,30 @@ def _streak_sodas(milestones: tuple[int, ...], *, settings: OurLifeSettings) -> 
 def _anniversary_dict(anniversary: Any) -> dict[str, Any] | None:
     """纪念日快照（面板直接渲染；没有就是 None，而不是空 dict）。"""
     return None if anniversary is None else dict(anniversary.as_dict())
+
+
+def _axis_view(state: ShardState, *, now: float) -> dict[str, Any]:
+    """面板「五轴卡」的数据面：档位明细 + 今日变化（锚点=今日最早注入快照）。
+
+    `day_start` 取 `inject_history` 里**今天最早**那条带 stats 的快照——与走势线同源，
+    不新造第三本账。今天一次都没注入过就是 `None`，面板据此不渲染"今日变化"
+    （缺锚点时显示 0 是编数据）。`to_next / next_tier` 由 `core.model.axis_details`
+    从 `TIER_BOUNDS` 现算，档位线只有那一个来源。
+    """
+    day = local_day(now)
+    day_start: Stats | None = None
+    for entry in state.inject_history:
+        if entry.get("stats") is None:
+            continue
+        try:
+            stamp = float(entry.get("at") or 0.0)
+        except (TypeError, ValueError):
+            continue  # 脏台账不许炸：认不出的时刻直接跳过，换下一条锚点
+        if local_day(stamp) != day:
+            continue
+        day_start = Stats.from_mapping(entry["stats"])
+        break
+    return axis_details(state.stats, day_start=day_start)
 
 
 def _shop_catalog() -> list[dict[str, Any]]:

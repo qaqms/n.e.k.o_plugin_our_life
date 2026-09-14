@@ -639,8 +639,13 @@ def test_stat_names_stay_the_panel_order() -> None:
 
 
 def _enabled_config() -> dict[str, Any]:
-    """总开关打开的最小配置（其余走 `OurLifeSettings` 的默认值）。"""
-    return {"our_life": {"enabled": True}}
+    """总开关打开的最小配置（其余走 `OurLifeSettings` 的默认值）。
+
+    必须同时关掉 `quiet_during_sleep`：本模块断言的是"判断→注入"链路**发得出**，
+    而默认睡眠窗（夜里）会把非危机注入整层抑制掉——白天的绿测试到半夜就变红
+    （2026-09-15 00:10 实踩：`test_tick_emits_a_judgment_injection` 在 HEAD 上过夜就红）。
+    睡眠抑制本身另有 `test_injection.py` 的专测，不靠这里顺带验。"""
+    return {"our_life": {"enabled": True, "inject": {"quiet_during_sleep": False}}}
 
 
 def _conversation(conversation_id: str, timestamp: float, lanlan: str, turn_type: str = "user") -> dict[str, Any]:
