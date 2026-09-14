@@ -47,9 +47,15 @@ __all__ = [
     "day_number_for",
     "lanlan_from_key",
     "shard_key",
+    "FOCUS_KEY",
 ]
 
 KEY_PREFIX = "ourlife@"
+
+# 面板焦点分片（v0.4.2）：多角色卡时面板唯一的"看哪张卡"信号。
+# 刻意**不**以 KEY_PREFIX 开头：否则 `list_persisted_lanlans` 的前缀扫描会把
+# "focus" 当成一张角色卡，面板上凭空多出一个鬼分片。
+FOCUS_KEY = "ourlife.focus"
 SEEN_IDS_MAX = 512
 INJECT_HISTORY_MAX = 20
 MEAL_DAYS_KEEP = 14
@@ -541,6 +547,37 @@ class StateStore:
             return _result_ok(await store.delete(shard_key(lanlan)))
         except Exception:
             self._log_debug("store.delete raised", exc=True)
+            return False
+
+    async def load_focus(self) -> str:
+        """读面板焦点分片名；任何故障都降级为空串（焦点缺席只是退回单分片判据）。"""
+        store = getattr(self._plugin, "store", None)
+        if store is None:
+            return ""
+        try:
+            from plugin.sdk.plugin import unwrap_or
+
+            payload = unwrap_or(await store.get(FOCUS_KEY, None), None)
+        except Exception:
+            self._log_debug("store.get(focus) raised", exc=True)
+            return ""
+        if isinstance(payload, Mapping):
+            name = payload.get("lanlan")
+            if isinstance(name, str):
+                return name.strip()
+        return ""
+
+    async def save_focus(self, lanlan: str) -> bool:
+        """写面板焦点；空串 = 清除。**失败只降级**：焦点是体验项，不是数据项。"""
+        store = getattr(self._plugin, "store", None)
+        if store is None:
+            return False
+        try:
+            if not lanlan:
+                return _result_ok(await store.delete(FOCUS_KEY))
+            return _result_ok(await store.set(FOCUS_KEY, {"lanlan": lanlan}))
+        except Exception:
+            self._log_debug("store.set(focus) raised", exc=True)
             return False
 
     async def _read_payload(self, lanlan: str) -> Mapping[str, Any] | None:

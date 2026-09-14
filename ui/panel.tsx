@@ -19,6 +19,7 @@ import {
   Alert,
   Button,
   Card,
+  Columns,
   DataTable,
   EmptyState,
   Field,
@@ -28,8 +29,11 @@ import {
   NumberInput,
   Page,
   Progress,
+  SegmentedControl,
   Select,
+  Slider,
   Stack,
+  StatCard,
   StatusBadge,
   Switch,
   Tabs,
@@ -318,6 +322,22 @@ export default function Panel(props: PluginSurfaceProps<State>) {
     }
   }
 
+  // 面板焦点切换（v0.4.2）：多张卡时唯一能选"看哪张"的途径——
+  // 宿主调 `@ui.context` 是不带任何角色信息的，后台无法替用户决定。
+  // "auto" 段发送空串清除焦点，退回"全局唯一分片才认"的自动判定。
+  const shardNames = state?.shards ?? []
+  const switchFocus = async (next: any) => {
+    const wanted = String(next ?? "")
+    const result = await run("focus", { lanlan: wanted === "auto" ? "" : wanted })
+    if (dismissResult(result)) return
+    if (result?.note === "focus_set") {
+      toast.success(t("panel.msg.focusSet"))
+    } else if (result?.note === "focus_cleared") {
+      toast.success(t("panel.msg.focusCleared"))
+    }
+    await props.api.refresh()
+  }
+
   const statOptions = STAT_KEYS.map((key) => ({ value: key, label: t(`panel.stat.${key}`) }))
   const catalogItems = catalog.map((entry) => ({
     value: String(entry.id ?? ""),
@@ -353,6 +373,25 @@ export default function Panel(props: PluginSurfaceProps<State>) {
 
   const tierOf = (key: string): string =>
     t(`panel.tier.${key}.${tiers[key] ?? "unknown"}`, { defaultValue: tiers[key] ?? "-" })
+
+  // 多卡时的焦点切换器；单卡不占地方（自动判定已够）。
+  // options 在 JSX 外构造：面板门是文本级的，标签内联对象字面量的 `label:`
+  // 会被误判成"给组件传了它没有的 prop"（catalogItems/statOptions 同理）。
+  const focusOptions =
+    shardNames.length > 1
+      ? [{ value: "auto", label: t("panel.focusAuto") }, ...shardNames.map((name) => ({ value: name, label: name }))]
+      : []
+  const focusSwitcher =
+    shardNames.length > 1 ? (
+      <Inline gap={8} align="center">
+        <Text>{t("panel.field.lanlan")}</Text>
+        <SegmentedControl
+          value={snapshot?.lanlan && state?.lanlan ? snapshot.lanlan : "auto"}
+          options={focusOptions}
+          onChange={(next: any) => switchFocus(next)}
+        />
+      </Inline>
+    ) : null
 
   // ---- 标签页内容 ----------------------------------------------------------
   // 每个 tab 的 content 在渲染期一并构造：kit 的 Tabs 只渲染激活页的 content，
@@ -433,6 +472,19 @@ export default function Panel(props: PluginSurfaceProps<State>) {
     <Stack gap={16}>
       <Card title={t("panel.section.advisor")}>
         <Stack gap={12}>
+          {/* 三个关键读数先立起来， KeyValue 长列表退到其次——"还够不够吃"不该藏在第七行。 */}
+          <Columns cols={3} minWidth={140} gap={12}>
+            <StatCard label={t("panel.field.sodas")} value={String(snapshot?.sodas ?? 0)} />
+            <StatCard
+              label={t("panel.field.staple")}
+              value={
+                daysRemaining === null || daysRemaining === undefined
+                  ? t("panel.advisor.stock", { units: advisor.stock_meals ?? 0 })
+                  : t("panel.advisor.days", { days: daysRemaining })
+              }
+            />
+            <StatCard label={t("panel.field.mealsToday")} value={String(snapshot?.meals_today ?? 0)} />
+          </Columns>
           <KeyValue
             items={[
               { key: "sodas", label: t("panel.field.sodas"), value: String(snapshot?.sodas ?? 0) },
@@ -462,7 +514,7 @@ export default function Panel(props: PluginSurfaceProps<State>) {
       <Grid cols={2} gap={16}>
         <Card title={t("panel.section.shop")}>
           <Stack gap={12}>
-            <Grid cols={2} gap={12}>
+            <Columns cols={2} minWidth={190} gap={12}>
               {catalog.map((entry) => (
                 <Card key={String(entry.id)} title={t(`panel.item.${entry.id ?? "unknown"}`, { defaultValue: entry.id ?? "-" })}>
                   <Stack gap={8}>
@@ -487,7 +539,7 @@ export default function Panel(props: PluginSurfaceProps<State>) {
                   </Stack>
                 </Card>
               ))}
-            </Grid>
+            </Columns>
             <Field label={t("fields.item")}>
               <Select value={buyItem} options={catalogItems} onChange={(next: any) => setBuyItem(String(next))} />
             </Field>
@@ -639,12 +691,13 @@ export default function Panel(props: PluginSurfaceProps<State>) {
             <Select value={tuneStat} options={statOptions} onChange={(next: any) => setTuneStat(String(next))} />
           </Field>
           <Field label={t("panel.field.value")}>
-            <NumberInput
-              value={tuneValue}
+            <Slider
+              value={Number(tuneValue === "" ? 0 : tuneValue)}
               min={0}
               max={100}
               step={1}
-              onChange={(next: number | string) => setTuneValue(next === "" ? "" : Number(next))}
+              showValue
+              onChange={(next: number) => setTuneValue(next)}
             />
           </Field>
           <Inline gap={12}>
@@ -756,15 +809,18 @@ export default function Panel(props: PluginSurfaceProps<State>) {
                     ? <StatusBadge tone="warning" label={t("panel.band.crisis", { axes: crisisAxes })} />
                     : null}
                 </Inline>
-                <Grid cols={5} gap={12}>
+                {focusSwitcher}
+                {/* 五轴用 fluid Columns：窄面板下自动流式换行（Grid cols=5 只有"5 列/1 列"两档）。
+                    数值不写进 label：kit 的 Progress 自带右侧百分比，写了会出现两个数。 */}
+                <Columns cols={5} minWidth={150} gap={12}>
                   {STAT_KEYS.map((key) => (
                     <Progress
                       key={key}
-                      label={`${t(`panel.stat.${key}`)} · ${tierOf(key)} · ${Number(snapshot[key] ?? 0).toFixed(1)}`}
-                      value={Number(snapshot[key] ?? 0)}
+                      label={`${t(`panel.stat.${key}`)} · ${tierOf(key)}`}
+                      value={Math.round(Number(snapshot[key] ?? 0))}
                     />
                   ))}
-                </Grid>
+                </Columns>
                 <Inline gap={16} align="center">
                   <Switch checked={enabled} label={t("panel.enabled")} onChange={(next: boolean) => toggleEnabled(next)} />
                   <Text>{enabled ? t("panel.running") : t("panel.stopped")}</Text>
@@ -783,7 +839,28 @@ export default function Panel(props: PluginSurfaceProps<State>) {
             <Tabs id="our_life.main" items={tabItems} />
           </>
         ) : (
-          <EmptyState title={t("panel.noShard")} description={t("panel.noShardHint")} />
+          <>
+            {/* 无分片也要递得出总开关：v0.4.1 之前开关只存在于状态带里，
+                而状态带只在有分片时渲染——新装机"先有鸡还是先有蛋"的死锁在这。 */}
+            <Card title={t("panel.section.switch")}>
+              <Stack gap={12}>
+                <Inline gap={16} align="center" wrap>
+                  <Switch checked={enabled} label={t("panel.enabled")} onChange={(next: boolean) => toggleEnabled(next)} />
+                  <Text>{enabled ? t("panel.running") : t("panel.stopped")}</Text>
+                  {actionOf("status") ? (
+                    <ActionButton
+                      action={actionOf("status")}
+                      label={t("actions.status.label")}
+                      onResult={() => toast.success(t("panel.msg.statsLoaded"))}
+                      onError={(error: Error) => toast.error(errorText(error, t))}
+                    />
+                  ) : null}
+                </Inline>
+                {focusSwitcher}
+                <EmptyState title={t("panel.noShard")} description={t("panel.noShardHint")} />
+              </Stack>
+            </Card>
+          </>
         )}
       </Stack>
     </Page>

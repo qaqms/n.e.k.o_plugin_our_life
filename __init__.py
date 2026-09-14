@@ -106,6 +106,10 @@ class OurLifePlugin(NekoPluginBase):
         self._injector = Injector(self, logger=self.logger)
         self._last_tick_at = 0.0
         self._tick_count = 0
+        # 面板焦点分片（v0.4.2）：多角色卡时"面板到底看哪张卡"的唯一信号。
+        # 优先级在 `_resolve_lanlan`：本次 `_ctx` > 焦点 > 全局唯一分片。
+        # 持久化在独立 store 键（见 `services/state.py` 的 `FOCUS_KEY`），重启后仍在。
+        self._focus_lanlan = ""
         # 已经落过盘的分片（每个角色卡每进程只 bootstrap 一次，避免面板刷新写 store）
         self._bootstrapped: set[str] = set()
         # 反馈闭环的**待消费判断**：工具可以在任意时刻被调用（不跟 tick 对齐），
@@ -131,6 +135,11 @@ class OurLifePlugin(NekoPluginBase):
         now = time.time()
         normalized = 0
         self._bootstrapped.update(known)
+        self._focus_lanlan = await self._store.load_focus()
+        if self._focus_lanlan and self._focus_lanlan not in known:
+            # 焦点指向已被删的分片：当场清除，不让一个鬼名字占住优先级。
+            self._focus_lanlan = ""
+            await self._store.save_focus("")
         for lanlan in known:
             state = await self._store.load(
                 lanlan, now=now, default_sodas=self._settings.economy.start_sodas
@@ -143,11 +152,12 @@ class OurLifePlugin(NekoPluginBase):
                 await self._store.save(state, now=now)
                 normalized += 1
         self.logger.info(
-            "our_life ready: enabled={} tick={}s shards={} normalized={} store={}",
+            "our_life ready: enabled={} tick={}s shards={} normalized={} focus={} store={}",
             self._settings.enabled,
             self._settings.tick_seconds,
             len(known),
             normalized,
+            self._focus_lanlan or "-",
             hasattr(self, "store"),
         )
         return Ok({"status": "ready", "enabled": self._settings.enabled, "shards": len(known)})
@@ -912,6 +922,41 @@ class OurLifePlugin(NekoPluginBase):
         await self._reload_settings()
         return Ok({"note": "enabled" if enabled else "disabled", "enabled": self._settings.enabled})
 
+    @ui.action(
+        id="focus",
+        label=tr("actions.focus.label", default="看这张卡"),
+        tone="info",
+        refresh_context=True,
+    )
+    @plugin_entry(
+        id="focus",
+        name=tr("entries.focus.name", default="切换面板看哪个角色卡"),
+        description=tr(
+            "entries.focus.description",
+            default="多角色卡时把面板焦点切到指定分片；传空字符串则恢复自动判定的唯一分片",
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "lanlan": {"type": "string", "description": tr("fields.lanlan", default="角色卡名")},
+            },
+            "required": ["lanlan"],
+        },
+    )
+    async def focus_entry(self, lanlan: str = "", **_):
+        name = str(lanlan or "").strip()
+        if not name:
+            self._focus_lanlan = ""
+            await self._store.save_focus("")
+            return Ok({"note": "focus_cleared"})
+        known = set(self._store.known_lanlans()) | set(await self._store.list_persisted_lanlans())
+        if name not in known:
+            # 不存在（或尚未被发现）的分片不许成焦点：否则面板会对着一个鬼分片渲染。
+            return Err(SdkError("invalid_lanlan"))
+        self._focus_lanlan = name
+        await self._store.save_focus(name)
+        return Ok({"note": "focus_set", "lanlan": name})
+
     # ------------------------------------------------------------------
     # 面板上下文
     # ------------------------------------------------------------------
@@ -920,8 +965,6 @@ class OurLifePlugin(NekoPluginBase):
     async def dashboard_context(self, **kwargs: Any) -> dict[str, Any]:
         lanlan, _error = await self._resolve_lanlan(kwargs, strict=False)
         now = time.time()
-        if not lanlan:
-            lanlan = await self._single_known_lanlan()
         settings = self._settings
         payload: dict[str, Any] = {
             "enabled": settings.enabled,
@@ -1211,19 +1254,35 @@ class OurLifePlugin(NekoPluginBase):
     async def _resolve_lanlan(
         self, kwargs: dict[str, Any], *, strict: bool = True
     ) -> tuple[str, Any | None]:
-        """解析本次调用属于哪个角色卡。
+        """解析本次调用属于哪个角色卡。优先级：**本次 `_ctx` > 面板焦点 > 全局唯一分片**。
 
-        **只用本次调用注入的 `_ctx["lanlan_name"]`**；缺失时（且全局只有唯一一个分片）才退化到
-        那个分片——唯一分片既可能是内存缓存里的，也可能是还没被加载、只在 store 里躺着的
-        （面板早于第一次 tick 打开就是这种情况），所以缓存空时要回查一次持久化分片。
+        - `_ctx["lanlan_name"]` 是宿主为本次调用注入的权威归属，永远最优先；
+        - 面板焦点（v0.4.2，`focus` 入口设置）只在它仍是真分片时参与；
+        - 都没命中时，若全局**只有唯一一个**分片才退化到它——既可能是内存缓存里的，
+          也可能是还没被加载、只在 store 里躺着的（面板早于第一次 tick 打开就是这种情况）。
         绝不读 `ctx._current_lanlan`——那是上一次调用残留的脏值。
         """
         lanlan = _lanlan_from_kwargs(kwargs)
+        if not lanlan:
+            lanlan = await self._focused_known_lanlan()
         if not lanlan:
             lanlan = await self._single_known_lanlan()
         if not lanlan and strict:
             return "", Err(SdkError("invalid_lanlan"))
         return lanlan, None
+
+    async def _focused_known_lanlan(self) -> str:
+        """面板焦点分片；只在它**仍是真分片**（内存或持久化）时有效，否则自清。"""
+        name = self._focus_lanlan
+        if not name:
+            return ""
+        if name in self._store.known_lanlans():
+            return name
+        if name in await self._store.list_persisted_lanlans():
+            return name
+        self._focus_lanlan = ""
+        await self._store.save_focus("")
+        return ""
 
     async def _single_known_lanlan(self) -> str:
         """全局唯一分片名（内存缓存优先，缓存空则回查 store）；否则空串。"""

@@ -74,6 +74,102 @@ def test_single_shard_is_used_as_fallback(make_plugin: Any, run_async: Any) -> N
 
 
 # ---------------------------------------------------------------------------
+# 面板焦点（v0.4.2）：多卡时"看哪张"的唯一信号
+# ---------------------------------------------------------------------------
+
+
+def _two_shard_store(host: Any, now: float) -> None:
+    host.store.data[SHARD_KEY] = _shard_payload(now=now)
+    host.store.data["ourlife@雪"] = _shard_payload(now=now)
+
+
+def test_focus_breaks_the_multi_shard_ambiguity(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin()
+    now = time.time()
+    _two_shard_store(host, now)
+    # 没有焦点：两张卡歧义，入口必须拒。
+    assert not run_async(plugin.status_entry()).is_ok()
+    assert run_async(plugin.focus_entry(lanlan="雪")).is_ok()
+    result = run_async(plugin.status_entry())
+    assert result.is_ok()
+    assert result.value["lanlan"] == "雪"
+
+
+def test_focus_rejects_unknown_shard(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin()
+    _two_shard_store(host, time.time())
+    result = run_async(plugin.focus_entry(lanlan="鬼"))
+    assert not result.is_ok()
+    # 拒了的焦点不许残留：后面的自动判定链保持原样。
+    assert plugin._focus_lanlan == ""
+
+
+def test_focus_cleared_restores_the_ambiguity_guard(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin()
+    _two_shard_store(host, time.time())
+    run_async(plugin.focus_entry(lanlan="雪"))
+    cleared = run_async(plugin.focus_entry(lanlan=""))
+    assert cleared.is_ok()
+    assert cleared.value["note"] == "focus_cleared"
+    assert not run_async(plugin.status_entry()).is_ok()
+
+
+def test_focus_survives_restart_via_store(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin()
+    _two_shard_store(host, time.time())
+    run_async(plugin.focus_entry(lanlan="雪"))
+    # 用同一个 store 重建"新进程"，并跑完整 startup——焦点必须从盘上回来。
+    plugin2, _ = make_plugin(store=host.store)
+    run_async(plugin2.on_startup())
+    assert plugin2._focus_lanlan == "雪"
+    result = run_async(plugin2.status_entry())
+    assert result.is_ok()
+    assert result.value["lanlan"] == "雪"
+
+
+def test_startup_clears_a_ghost_focus(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin()
+    host.store.data[SHARD_KEY] = _shard_payload(now=time.time())
+    host.store.data["ourlife.focus"] = {"lanlan": "鬼"}
+    run_async(plugin.on_startup())
+    assert plugin._focus_lanlan == ""
+    assert "ourlife.focus" not in host.store.data
+
+
+def test_dashboard_follows_the_focus(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin()
+    _two_shard_store(host, time.time())
+    bare = run_async(plugin.dashboard_context())
+    assert bare["lanlan"] == "" and bare["error_code"] == "invalid_lanlan"
+    run_async(plugin.focus_entry(lanlan="雪"))
+    focused = run_async(plugin.dashboard_context())
+    assert focused["lanlan"] == "雪"
+    assert focused.get("error_code") in (None, "store_unavailable") or focused["state"] is not None
+    assert focused["state"] is not None
+
+
+def test_focus_still_works_in_memory_when_persistence_fails(make_plugin: Any, run_async: Any, make_store: Any) -> None:
+    """store 通道故障时焦点仍可在本进程内切换：它是体验项，不是数据项。
+
+    分片只在内存缓存里（模拟持久化写不进去的世界）：`focus` 必须回 `Ok`，
+    但盘上什么都不会多出来；重启后退回自动判定——这是契约，不是巧合。
+    """
+    from our_life.services.state import ShardState
+
+    broken = make_store(available=False)
+    plugin, _host = make_plugin(store=broken)
+    plugin._store._cache["雪"] = ShardState(lanlan="雪")
+    result = run_async(plugin.focus_entry(lanlan="雪"))
+    assert result.is_ok()
+    assert result.value["note"] == "focus_set"
+    assert plugin._focus_lanlan == "雪"
+    assert "ourlife.focus" not in broken.data  # 写不进去，但也不报错
+    # 解析链同拍生效：焦点在内存里就认。
+    lanlan, error = run_async(plugin._resolve_lanlan({}))
+    assert error is None and lanlan == "雪"
+
+
+# ---------------------------------------------------------------------------
 # 入口参数校验
 # ---------------------------------------------------------------------------
 

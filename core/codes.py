@@ -29,6 +29,9 @@ PANEL_ERROR_CODES: frozenset[str] = frozenset(
         "stats_loaded",  # 查询成功（成功档也用码，前端按码渲染 toast）
         "stat_updated",  # 手动纠偏成功
         "stats_reset",  # 重置成功
+        # 面板焦点（v0.4.2，成功档）
+        "focus_set",  # 焦点已切到指定分片
+        "focus_cleared",  # 焦点已清除，退回自动判定
         # 参数非法
         "invalid_stat",  # 未知数值名
         "invalid_value",  # 数值不是 0..100 的数字

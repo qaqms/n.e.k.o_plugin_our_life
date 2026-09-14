@@ -32,6 +32,8 @@ FORBIDDEN_PROPS: dict[str, tuple[str, ...]] = {
     "NumberInput": ("label",),  # NumberInput 没有 label，要包 Field
     "Select": ("label",),  # Select 没有 label，要包 Field
     "Progress": ("percent",),  # Progress 用 value
+    "Slider": ("label",),  # Slider 没有 label（只有 showValue），要包 Field
+    "SegmentedControl": ("label",),  # 同理：没有 label，标签文字另放 Text
 }
 
 # 合法使用同名 prop 的组件：不做检查（`Field`/`Switch` 的 label 就是对的）
@@ -102,6 +104,10 @@ def test_panel_uses_tabbed_layout_with_a_persistent_status_band() -> None:
     for band_key in ("panel.band.day", "panel.band.streak", "panel.band.crisis"):
         assert f't("{band_key}"' in source, f"missing status band key {band_key}"
     assert '<Tabs id="our_life.main"' in source, "Tabs must keep the persisted id"
+    # v0.4.2：窄面板自适应与真机适配面必须在（防止无意改回固定列/输入框）。
+    for affordance in ("<Columns", "<Slider", "<SegmentedControl"):
+        assert affordance in source, f"panel must keep the v0.4.2 affordance {affordance}"
+    assert 'run("focus"' in source, "shard switcher must drive the focus entry"
 
 
 def test_panel_has_a_single_default_function_export() -> None:

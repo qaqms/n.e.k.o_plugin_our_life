@@ -52,6 +52,8 @@ SUCCESS_NOTES = (
     "shop_purchased",
     "care_applied",
     "coin_updated",
+    "focus_set",
+    "focus_cleared",
 )
 
 RE_TR_LITERAL = re.compile(r'\btr\(\s*"([^"]+)"')
