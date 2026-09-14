@@ -18,19 +18,38 @@ from pathlib import Path
 
 from our_life.core.codes import PANEL_ERROR_CODES, camel_case, is_panel_code
 from our_life.core.injection import (
+    TRIGGER_ANNIVERSARY,
     TRIGGER_COMPANY,
     TRIGGER_CRISIS,
     TRIGGER_DAILY_GREET,
+    TRIGGER_HUNGRY,
     TRIGGER_INTERVAL,
     TRIGGER_TIER_CHANGE,
+    TRIGGER_TIRED,
 )
-from our_life.core.model import AFFECTION_TIERS, HEALTH_TIERS, MOOD_TIERS, STAT_NAMES
+from our_life.core.model import (
+    AFFECTION_TIERS,
+    ENERGY_TIERS,
+    HEALTH_TIERS,
+    MOOD_TIERS,
+    SATIETY_TIERS,
+    STAT_NAMES,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCALES = ("zh-CN", "en")
 
 # 入口在成功路径返回的 note 码 → 面板 `panel.msg.<camel>`  toast 文案
-SUCCESS_NOTES = ("stats_loaded", "stat_updated", "stats_reset", "enabled", "disabled")
+SUCCESS_NOTES = (
+    "stats_loaded",
+    "stat_updated",
+    "stats_reset",
+    "enabled",
+    "disabled",
+    "shop_purchased",
+    "care_applied",
+    "coin_updated",
+)
 
 RE_TR_LITERAL = re.compile(r'\btr\(\s*"([^"]+)"')
 RE_T_LITERAL = re.compile(r'\bt\(\s*"([^"]+)"')
@@ -144,7 +163,13 @@ def test_python_tr_referenced_keys_exist() -> None:
 
 
 def test_tier_keys_exist_for_every_stat_and_tier() -> None:
-    families = {"affection": AFFECTION_TIERS, "mood": MOOD_TIERS, "health": HEALTH_TIERS}
+    families = {
+        "affection": AFFECTION_TIERS,
+        "mood": MOOD_TIERS,
+        "health": HEALTH_TIERS,
+        "satiety": SATIETY_TIERS,
+        "energy": ENERGY_TIERS,
+    }
     assert set(families) == set(STAT_NAMES)
     for locale in LOCALES:
         messages = _load(locale)
@@ -161,6 +186,9 @@ def test_trigger_keys_exist_for_every_trigger() -> None:
         TRIGGER_DAILY_GREET,
         TRIGGER_INTERVAL,
         TRIGGER_COMPANY,
+        TRIGGER_HUNGRY,
+        TRIGGER_TIRED,
+        TRIGGER_ANNIVERSARY,
     )
     for locale in LOCALES:
         messages = _load(locale)

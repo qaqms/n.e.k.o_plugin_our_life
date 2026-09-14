@@ -1,23 +1,31 @@
 [plugin]
 id = "our_life"
 name = "我们的生活"
-description = "养成系陪伴：为猫娘维护好感度 / 心情 / 健康三项随真实时间演化的状态，以她自己的身心感受强注入对话上下文。日常互动会喂养数值，长期冷落则拟真衰减，掉到生病 / 闹脾气档时她会主动开口。"
-short_description = "养成系数值：好感度 / 心情 / 健康随时间真实演化并注入她的身心感受"
+description = "养成系陪伴：为猫娘维护饱食 / 精力 / 心情 / 健康 / 好感五项随真实时间演化的状态，以她自己的身心感受强注入对话上下文。她有作息（夜里会睡）、有金币与背包，每天会自己吃掉你囤的口粮——囤得够、按时回来，日子就过得下去。掉到生病 / 闹脾气 / 饿坏了档时她会主动开口。"
+short_description = "养成系数值：五项状态随真实时间与作息演化，她每天自己吃饭，口粮顾问帮你算该囤多少"
 keywords = [
     "养成",
     "好感度",
     "心情",
     "健康",
+    "饱食",
+    "精力",
+    "口粮",
+    "金币",
+    "背包",
     "陪伴",
     "数值",
     "affection",
     "mood",
     "health",
+    "satiety",
+    "energy",
+    "economy",
     "raising",
     "tamagotchi",
     "care",
 ]
-version = "0.1.0"
+version = "0.2.0"
 type = "plugin"
 entry = "plugin.plugins.our_life:OurLifePlugin"
 
@@ -61,17 +69,18 @@ auto_start = true
 # 业务配置
 # 这里的值是「默认值」；用户在 <用户数据根>/plugins/our_life/config/plugin.toml 里的覆盖层
 # 优先。config.example.toml 是同一份形状的镜像（那份不含任何 [plugin*] 表）。
-# 分档阈值不在此暴露：它们固定在 core/model.py 常量里作为单一来源，避免配置漂移。
+# 分档阈值、模型常量（饱食/精力衰减速率、耦合阈值）与纪念日锚点不在此暴露：
+# 它们固定在 core/model.py 与 core/rhythm.py 里作为单一来源，避免配置漂移。
 # ---------------------------------------------------------------------------
 
 [our_life]
-# fail-closed 总开关：false = 完全冻结（不注入、不结算衰减、不推送），数值原样保留。
+# fail-closed 总开关：false = 完全冻结（不注入、不结算衰减、不吃饭、不推送），数值原样保留。
 enabled = false
-# 后台 tick 间隔（秒）。负责行为采样 + 惰性衰减结算 + 注入判定。
+# 后台 tick 间隔（秒）。负责行为采样 + 惰性衰减结算 + 进食 + 注入判定。
 tick_seconds = 30
 
 [our_life.decay]
-# 心情：小时级。向静息基线回落（高于基线降、低于基线回升），不是一路掉到 0。
+# 心情：小时级。向静息基线回落（高于基线降、低于基线升），不是一路掉到 0。
 mood_tau_hours = 3.0
 mood_rest_baseline = 55.0
 # 健康：天级。同样向静息基线回落；长期冷落会额外扣（见 neglect）。
@@ -79,6 +88,39 @@ health_tau_hours = 36.0
 health_rest_baseline = 70.0
 # 好感：周级。只缓慢回落、不自动回升——它只靠互动长（见 growth）。
 affection_tau_days = 45.0
+
+[our_life.rhythm]
+# 作息：睡眠时段（支持跨零点，24 表示 24:00 即次日 00:00）。
+# 睡眠时精力回复、饱食掉得慢、不吃东西，也不会被非危机的注入吵醒。
+sleep_start_hour = 24
+sleep_end_hour = 8
+# 纪念日（相处第 3/7/14/30/60/100/180/365 天与每个整年）的一次性奖励。
+anniversary_mood = 12.0
+anniversary_affection = 5.0
+
+[our_life.economy]
+# 金币与口粮：她每天会自己吃掉背包里的口粮；囤的吃完而你没回来，她就会饿。
+enabled = true
+# 口粮种类（可买物品的 id 之一）：自动进食优先吃它，口粮顾问按它的单价算补货建议。
+staple_item_id = "meat"
+# 每天自动发的零花钱（按本地日期，一天一次）。
+daily_allowance = 30
+# 单个角色的携带上限（每种物品最多几件）。
+carry_max = 8
+# 每日消费上限（0 = 不限）；防止手滑把一整月的金币花在一件东西上。
+shop_daily_limit = 240
+# 饱食低于这个值她就想吃饭（落在「吃饱了」档内，见面板档位）。
+meal_threshold = 55.0
+# 口粮顾问：囤货视野（天）与"快见底"的告警阈值（天）。
+advisor_horizon_days = 7
+advisor_warn_days = 2.0
+# 新角色卡初始金币。
+start_sodas = 40
+# 日薪：每次发言的报酬、跨天首触的奖励、连续相处每天的加成、单次结算最多认几次发言。
+turn_reward = 0.6
+new_day_bonus = 4.0
+streak_reward = 0.7
+max_turns_per_session = 20
 
 [our_life.growth]
 # 每次用户发言：心情 +2.5 / 健康 +0.8 / 好感 +0.35。
@@ -95,10 +137,12 @@ day_greet_affection = 3.0
 streak_milestones = [3, 7, 14, 30]
 streak_affection_bonus = [5.0, 8.0, 12.0, 20.0]
 streak_mood_bonus = [10.0, 10.0, 15.0, 20.0]
+streak_sodas_bonus = [5, 10, 20, 40]
 
 [our_life.neglect]
-# 冷落惩罚（拟真、惩罚式）：超过 grace_hours 没互动，按天扣，各自有上限，
-# 避免"一个月没来直接清零"这种不可逆体验。
+# 冷落惩罚（拟真、惩罚式）：超过 grace_hours 没互动，按天扣（只扣心情/健康/好感），
+# 各自有上限，避免"一个月没来直接清零"这种不可逆体验。
+# 饱食与精力不在这里扣——它们由作息与进食驱动，再扣一次就是双重惩罚。
 grace_hours = 24.0
 mood_penalty_per_day = 6.0
 health_penalty_per_day = 4.0
@@ -116,7 +160,14 @@ max_chars = 320
 # 分档「向下」跨越到危机档时，升级为 ai_behavior="respond"，让她主动开口；
 # 其余跨越一律 ai_behavior="read"（进上下文但不打断）。
 respond_on_crisis = true
+# 危机档判据（「不高于」该档即算危机）：心情 / 身体 / 肚子 / 精力。
 crisis_mood_tier = "sulking"
 crisis_health_tier = "sick"
+crisis_satiety_tier = "starving"
+crisis_energy_tier = "exhausted"
 # 她主动「索取陪伴」LLM 工具的冷却（秒）。
 company_cooldown_sec = 7200
+# 「她主动开口」的每小时上限（比 max_per_hour 更严，避免她一天里反复弹你）。
+respond_max_per_hour = 1
+# 她在睡觉时是否压住非危机注入（危机照旧允许：真饿坏了那本来就该被照顾）。
+quiet_during_sleep = true

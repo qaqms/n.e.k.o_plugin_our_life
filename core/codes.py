@@ -33,11 +33,22 @@ PANEL_ERROR_CODES: frozenset[str] = frozenset(
         "invalid_stat",  # 未知数值名
         "invalid_value",  # 数值不是 0..100 的数字
         "invalid_lanlan",  # 角色标识为空 / 非法
+        "invalid_item",  # 未知物品 id
+        "invalid_quantity",  # 数量不是正整数
+        "insufficient_sodas",  # 金币不够
+        "carry_full",  # 携带上限已满
+        "over_daily_limit",  # 触发当日消费上限
+        # 商店 / 照料（成功档）
+        "shop_purchased",  # 买到了
+        "care_applied",  # 用掉了一件东西
+        "coin_updated",  # 手动补了一笔金币
         # 运行时故障
         "store_unavailable",  # PluginStore 不可用（未启用或通道故障）
         "config_unavailable",  # 配置不可读
         # 「索取陪伴」工具冷却
         "company_cooldown",  # 冷却中，还没到可以撒娇的时机
+        # 她在睡觉：非危机的"索取陪伴"会被挡下（不是错误，是作息）
+        "sleeping",  # 她已经睡了，等她醒了再说
     }
 )
 

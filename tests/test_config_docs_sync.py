@@ -18,16 +18,20 @@ from typing import Any, Mapping
 
 from our_life.core.configuration import (
     DecaySettings,
+    EconomySettings,
     GrowthSettings,
     InjectSettings,
     NeglectSettings,
     OurLifeSettings,
+    RhythmSettings,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 FAMILY_ROOT = "our_life"
 SUB_SECTIONS = (
     ("decay", DecaySettings),
+    ("rhythm", RhythmSettings),
+    ("economy", EconomySettings),
     ("growth", GrowthSettings),
     ("neglect", NeglectSettings),
     ("inject", InjectSettings),
@@ -142,3 +146,43 @@ def test_panel_declares_the_context_it_exposes() -> None:
     assert panel["context"] == "dashboard"
     assert panel["entry"] == "ui/panel.tsx"
     assert panel["permissions"] == ["state:read", "config:read", "action:call"]
+
+
+# ---------------------------------------------------------------------------
+# 跨层一致性：配置里指的物品必须真的存在、且真的能当饭吃
+# ---------------------------------------------------------------------------
+
+
+def test_staple_item_points_at_a_real_food_item() -> None:
+    """`staple_item_id` 配错会让自动进食**静默**退化（`meal_plan` 找不到它就换别的吃，
+    一件都没有时才饿着），所以把它钉在门上：必须存在、必须是食物。
+    """
+    from our_life.core.economy import item, meal_plan
+
+    economy = OurLifeSettings().economy
+    staple = item(economy.staple_item_id)
+    assert staple is not None, f"staple_item_id={economy.staple_item_id!r} is not in the catalog"
+    assert staple.food, f"{staple.id!r} is not edible, so she could never eat it"
+    # 顺带确认它真的会被 meal_plan 选中（不是"存在于表里但用不上"）
+    from our_life.core.economy import Inventory
+
+    plan = meal_plan(
+        Inventory.from_mapping({staple.id: 2}),
+        staple_item_id=staple.id,
+        satiety=10.0,
+        threshold=economy.meal_threshold,
+    )
+    assert plan == staple.id
+
+
+def test_meal_threshold_sits_inside_the_satisfied_band() -> None:
+    """"她饿了"与面板的饱食档位必须是同一个信号（见 `core/economy` 模块 docstring）。
+
+    阈值落在 satisfied 档（下界 40）之内，面板上读作"饱食掉到『吃饱了』以下"。
+    """
+    from our_life.core.model import TIER_BOUNDS
+
+    threshold = OurLifeSettings().economy.meal_threshold
+    assert TIER_BOUNDS[2] <= threshold < TIER_BOUNDS[3], (
+        f"meal_threshold={threshold} is outside the satisfied tier band"
+    )

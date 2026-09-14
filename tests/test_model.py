@@ -303,7 +303,8 @@ def test_eventful_transitions_reuses_the_plain_tier_names() -> None:
     before = Stats(affection=20.0, mood=59.0, health=70.0)
     after = Stats(affection=19.0, mood=61.0, health=70.0)
     eventful = eventful_tier_transitions(before, after)
-    assert eventful == (("affection", "acquainted", "stranger"), ("mood", "calm", "happy"))
+    # 顺序按 `STAT_NAMES`（精力/饱食在最前），所以这里比集合而不是比序列
+    assert set(eventful) == {("affection", "acquainted", "stranger"), ("mood", "calm", "happy")}
     for stat, old_tier, new_tier in eventful:
         assert old_tier == tier_of(stat, getattr(before, stat))
         assert new_tier == tier_of(stat, getattr(after, stat))

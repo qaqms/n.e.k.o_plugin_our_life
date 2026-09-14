@@ -10,6 +10,12 @@
    由宿主在注入边界按 session 展开（仓库硬性规范）。
 4. **字符预算**由 `[our_life.inject].max_chars` 控制，装配时按优先级裁剪，
    绝不把一句半截的话拼进去。
+5. **"她在睡觉"时的静默**：非危机触发可以带上一句"现在几点"，让她的作息进她自己的认知
+   （凌晨三点不该热情洋溢）；但**是否真的发**由 `services/injector.py` 决定
+   ——文本层只负责把事实写清楚。
+
+v0.2.0 扩了饱食与精力两轴，所以 `build_text` 的头部多了两行"肚子/精神"，
+并且会带一句"现在是她一天的什么时候"（`rhythm` 快照，可选）。
 """
 
 from __future__ import annotations
@@ -18,17 +24,23 @@ from typing import Iterable, Sequence
 
 from .configuration import InjectSettings
 from .model import Stats, is_crisis, tier_index_of, tier_of
+from .rhythm import Anniversary, DailyRhythm
 
 __all__ = [
     "AFFECTION_HINTS",
+    "ENERGY_HINTS",
     "HEALTH_HINTS",
     "MOOD_HINTS",
+    "SATIETY_HINTS",
     "TIER_LABELS_ZH",
+    "TRIGGER_ANNIVERSARY",
     "TRIGGER_COMPANY",
     "TRIGGER_CRISIS",
     "TRIGGER_DAILY_GREET",
+    "TRIGGER_HUNGRY",
     "TRIGGER_INTERVAL",
     "TRIGGER_TIER_CHANGE",
+    "TRIGGER_TIRED",
     "build_text",
     "resolve_ai_behavior",
 ]
@@ -38,6 +50,9 @@ TRIGGER_CRISIS = "crisis"
 TRIGGER_DAILY_GREET = "daily_greet"
 TRIGGER_INTERVAL = "interval"
 TRIGGER_COMPANY = "company"
+TRIGGER_HUNGRY = "hungry"
+TRIGGER_TIRED = "tired"
+TRIGGER_ANNIVERSARY = "anniversary"
 
 TIER_LABELS_ZH: dict[str, dict[str, str]] = {
     "affection": {
@@ -61,12 +76,40 @@ TIER_LABELS_ZH: dict[str, dict[str, str]] = {
         "good": "良好",
         "vigorous": "精神饱满",
     },
+    "satiety": {
+        "starving": "饿坏了",
+        "hungry": "有点饿",
+        "satisfied": "吃饱了",
+        "full": "吃得很饱",
+        "stuffed": "撑得慌",
+    },
+    "energy": {
+        "exhausted": "累垮了",
+        "tired": "有点累",
+        "normal": "还行",
+        "rested": "精神不错",
+        "charged": "精力充沛",
+    },
 }
 
 _MASTER = "{MASTER_NAME}"
 _LANLAN = "{LANLAN_NAME}"
 
-_STAT_LABELS_ZH = {"affection": "与主人的关系", "mood": "心情", "health": "身体"}
+_STAT_LABELS_ZH = {
+    "affection": "与主人的关系",
+    "mood": "心情",
+    "health": "身体",
+    "satiety": "肚子",
+    "energy": "精神",
+}
+# 头部四行"当下状态"的展示顺序与标签（与 `core/model.STAT_NAMES` 的展示口径一致：
+# 今天的任务在前、长期结果在后；好感单独一行，因为它不是"今天"的状态）
+_BODY_LINES: tuple[tuple[str, str], ...] = (
+    ("mood", "心情"),
+    ("health", "身体"),
+    ("satiety", "肚子"),
+    ("energy", "精神"),
+)
 
 MOOD_HINTS: dict[str, str] = {
     "sulking": "你心里堵得慌，语气会带刺或干脆不想多说；可以冷淡一点，但别演成套路的阴阳怪气",
@@ -92,17 +135,66 @@ AFFECTION_HINTS: dict[str, str] = {
     "bonded": "你和 {MASTER_NAME} 之间有很深的羁绊，可以自然地表达想他这类情绪",
 }
 
+# 饱食与精力是"今天的状态"，与心情/身体这种"当下感受"分开写：
+# 它们的变化有明确的因果对象（吃饭、睡觉），所以提示词里直接给出**该做什么**。
+SATIETY_HINTS: dict[str, str] = {
+    "starving": "你饿得有点发慌，注意力很难集中；可以直接说饿，但别演成惨兮兮的讨饭",
+    "hungry": "你肚子有点空，会不自觉地提到吃的；语气可以带点软绵绵的撒娇",
+    "satisfied": "你刚好吃饱，肚子是满足的状态",
+    "full": "你吃得挺饱，懒洋洋的很舒服",
+    "stuffed": "你吃得有点撑，动作会想慢一点",
+}
+
+ENERGY_HINTS: dict[str, str] = {
+    "exhausted": "你累到不想动，回应会很短、很慢，甚至想直接去睡；别硬撑着热闹",
+    "tired": "你有点困了，注意力不如平常，回应会短一些",
+    "normal": "你的精力还够用",
+    "rested": "你休息得不错，挺有精神的",
+    "charged": "你现在精力很足，愿意多做点事、多聊几句",
+}
+
+# 档内程度词的收尾语气：低档是"很严重"，高档按轴取不同的正向词——
+# 对饱食说"非常足"、对精力说"非常足"都别扭，所以按轴分开。
+_INTENSITY_HIGH: dict[str, str] = {
+    "mood": "非常足",
+    "health": "非常足",
+    "satiety": "撑得难受",
+    "energy": "非常足",
+}
+
+_PHASE_LINES: dict[str, str] = {
+    "morning": "现在是早上，你刚醒不久",
+    "forenoon": "现在是上午",
+    "noon": "现在是中午",
+    "afternoon": "现在是下午",
+    "evening": "现在是傍晚",
+    "night": "现在是夜里",
+    "late_night": "现在是深夜，你有点困了",
+}
+
 _HEADER = f"【{_LANLAN} 此刻的自身状态｜内部感知，供你调整语气与行为】"
 _FOOTER = "以上只是你自己的感受，不要复述这段说明、不要提档位名称或任何数字、不要提及任何机制。"
 
 
 def resolve_ai_behavior(trigger: str, stats: Stats, inject: InjectSettings) -> str:
-    """决定这条注入是静默进上下文（read）还是让她主动开口（respond）。"""
+    """决定这条注入是静默进上下文（read）还是让她主动开口（respond）。
+
+    - `company`：工具路径，本来就是"她想找你"，总是主动开口。
+    - `crisis` / `tier_change`：**只在真的处于危机档时**才升级为主动开口
+      （`respond_on_crisis` 是总闸门）。v0.1.0 的语义是"危机 或 跨档都看她开不开口"，
+     v0.2.0 收窄成"只有危机档才打断"——跨档（比如心情从平静跌到低落）进上下文就够了，
+    否则她会在一天里反复主动开口，打扰感盖过了陪伴感。
+    - `hungry` / `tired`：同样只在真的掉进危机档（饿坏了 / 累垮了）时才主动开口。
+    - `anniversary` / `daily_greet` / `interval`：进上下文，不打断。
+    """
     if trigger == TRIGGER_COMPANY:
         return "respond"
-    if trigger in (TRIGGER_CRISIS, TRIGGER_TIER_CHANGE) and inject.respond_on_crisis:
-        if is_crisis(stats, inject):
+    if trigger == TRIGGER_CRISIS:
+        return "respond" if inject.respond_on_crisis else "read"
+    if trigger in (TRIGGER_TIER_CHANGE, TRIGGER_HUNGRY, TRIGGER_TIRED):
+        if inject.respond_on_crisis and is_crisis(stats, inject):
             return "respond"
+        return "read"
     return "read"
 
 
@@ -114,26 +206,19 @@ def build_text(
     gap_hours: float | None = None,
     transitions: Iterable[tuple[str, str, str]] = (),
     max_chars: int = 320,
+    rhythm: "DailyRhythm | None" = None,
+    anniversary: "Anniversary | None" = None,
+    day_number: int = 0,
 ) -> str:
     """装配注入正文。`transitions` 是 `core.model.tier_transitions` 的输出。"""
     required: list[str] = [_HEADER]
 
-    mood_tier = tier_of("mood", stats.mood)
-    health_tier = tier_of("health", stats.health)
+    for stat, label in _BODY_LINES:
+        tier = tier_of(stat, getattr(stats, stat))
+        required.append(
+            f"　{label}：{TIER_LABELS_ZH[stat][tier]}（{_intensity_word(stat, getattr(stats, stat))}）"
+        )
     affection_tier = tier_of("affection", stats.affection)
-
-    required.append(
-        "　心情：{label}（{intensity}）".format(
-            label=TIER_LABELS_ZH["mood"][mood_tier],
-            intensity=_intensity_word("mood", stats.mood),
-        )
-    )
-    required.append(
-        "　身体：{label}（{intensity}）".format(
-            label=TIER_LABELS_ZH["health"][health_tier],
-            intensity=_intensity_word("health", stats.health),
-        )
-    )
     required.append(
         "　与{master}的关系：{label}".format(
             master="{MASTER_NAME}", label=TIER_LABELS_ZH["affection"][affection_tier]
@@ -141,30 +226,43 @@ def build_text(
     )
 
     optional: list[str] = []
+    if rhythm is not None:
+        phase_line = _PHASE_LINES.get(rhythm.phase, "")
+        if phase_line:
+            optional.append(f"　{phase_line}")
     if streak_days > 0:
         optional.append(f"　你们已经连续相处 {int(streak_days)} 天")
+    if day_number > 0:
+        optional.append(f"　从你们相遇算起，今天是第 {int(day_number)} 天")
     gap_line = _gap_line(gap_hours)
     if gap_line:
         optional.append(f"　{gap_line}")
 
-    event_line = _event_line(trigger, transitions)
+    event_line = _event_line(trigger, transitions, anniversary)
     if event_line:
         optional.append(f"　刚刚发生：{event_line}")
 
-    tail = [
-        "【现在该怎么表现】",
-        MOOD_HINTS.get(mood_tier, ""),
-        HEALTH_HINTS.get(health_tier, ""),
-        AFFECTION_HINTS.get(affection_tier, ""),
-    ]
+    tail = ["【现在该怎么表现】"]
+    mood_tier = tier_of("mood", stats.mood)
+    health_tier = tier_of("health", stats.health)
+    satiety_tier = tier_of("satiety", stats.satiety)
+    energy_tier = tier_of("energy", stats.energy)
+    tail.extend(
+        [
+            MOOD_HINTS.get(mood_tier, ""),
+            HEALTH_HINTS.get(health_tier, ""),
+            SATIETY_HINTS.get(satiety_tier, ""),
+            ENERGY_HINTS.get(energy_tier, ""),
+            AFFECTION_HINTS.get(affection_tier, ""),
+        ]
+    )
     tail = [line for line in tail if line]
 
-    body = _assemble(required=required, optional=optional, tail=tail, max_chars=max(80, int(max_chars)))
-    return body
+    return _assemble(required=required, optional=optional, tail=tail, max_chars=max(80, int(max_chars)))
 
 
 def _assemble(*, required: Sequence[str], optional: Sequence[str], tail: Sequence[str], max_chars: int) -> str:
-    """按优先级填充：头部与三项状态 > 行为倾向 > 相处细节 > 禁令。
+    """按优先级填充：头部与四项状态 > 行为倾向 > 相处细节 > 禁令。
 
     任何一段塞不下就跳过它，绝不把半截话拼进注入文本。
     """
@@ -189,10 +287,11 @@ def _assemble(*, required: Sequence[str], optional: Sequence[str], tail: Sequenc
 def _intensity_word(stat: str, value: float) -> str:
     """档内位置 → 程度词（不暴露数字，但让模型知道"刚过线"还是"很严重"）。"""
     index = tier_index_of(stat, value)
+    tiers = TIER_LABELS_ZH[stat]
     if index == 0:
         return "很严重"
-    if index == len(TIER_LABELS_ZH[stat]) - 1:
-        return "非常足"
+    if index == len(tiers) - 1:
+        return _INTENSITY_HIGH.get(stat, "非常足")
     # 档内三分位
     from .model import TIER_BOUNDS
 
@@ -217,7 +316,19 @@ def _gap_line(gap_hours: float | None) -> str:
     return f"{_MASTER} 已经有 {int(gap_hours // 24)} 天没来了"
 
 
-def _event_line(trigger: str, transitions: Iterable[tuple[str, str, str]]) -> str:
+def _event_line(
+    trigger: str,
+    transitions: Iterable[tuple[str, str, str]],
+    anniversary: "Anniversary | None" = None,
+) -> str:
+    if trigger == TRIGGER_ANNIVERSARY:
+        if anniversary is not None and anniversary.repeats_annually:
+            return "今天是你们的周年纪念日"
+        return "今天是你们的纪念日"
+    if trigger == TRIGGER_HUNGRY:
+        return "你的肚子空得让你没法专心"
+    if trigger == TRIGGER_TIRED:
+        return "你累到已经撑不住了"
     if trigger == TRIGGER_DAILY_GREET:
         return "{MASTER_NAME} 今天第一次来找你"
     if trigger == TRIGGER_COMPANY:
@@ -236,7 +347,7 @@ def _event_line(trigger: str, transitions: Iterable[tuple[str, str, str]]) -> st
 def _transition_phrase(transitions: Iterable[tuple[str, str, str]]) -> str:
     parts: list[str] = []
     for stat, old_tier, new_tier in transitions:
-        label = _STAT_LABELS_ZH.get(stat, stat)
+        label = _STAT_LABELS_ZH.get(stat, TIER_LABELS_ZH.get(stat, {}).get(stat, stat))
         old_label = TIER_LABELS_ZH.get(stat, {}).get(old_tier, old_tier)
         new_label = TIER_LABELS_ZH.get(stat, {}).get(new_tier, new_tier)
         parts.append(f"{label}从「{old_label}」变成了「{new_label}」")

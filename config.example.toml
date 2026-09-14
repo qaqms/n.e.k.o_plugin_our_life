@@ -14,10 +14,10 @@ enabled = true
 auto_start = true
 
 [our_life]
-# fail-closed 总开关。false = 完全冻结：不注入、不结算衰减、不推送，数值原样保留。
+# fail-closed 总开关。false = 完全冻结：不注入、不结算衰减、不吃饭、不推送，数值原样保留。
 # 打开后插件才开始「过日子」。
 enabled = false
-# 后台 tick 间隔（秒）：行为采样 + 惰性衰减结算 + 注入判定。
+# 后台 tick 间隔（秒）：行为采样 + 惰性衰减结算 + 进食 + 注入判定。
 tick_seconds = 30
 
 [our_life.decay]
@@ -30,6 +30,39 @@ health_rest_baseline = 70.0
 # 好感只缓慢回落、不自动回升——它只能靠互动长。
 affection_tau_days = 45.0
 
+[our_life.rhythm]
+# 作息：睡眠时段（支持跨零点，24 表示 24:00 即次日 00:00）。
+# 睡眠时她精力回复、饱食掉得慢、不吃东西，也不会被非危机的注入吵醒。
+sleep_start_hour = 24
+sleep_end_hour = 8
+# 纪念日（相处第 3/7/14/30/60/100/180/365 天与每个整年）的一次性奖励。
+anniversary_mood = 12.0
+anniversary_affection = 5.0
+
+[our_life.economy]
+# 金币与口粮：她每天会自己吃掉背包里的口粮；囤的吃完而你没回来，她就会饿。
+enabled = true
+# 口粮种类（可买物品的 id 之一）：自动进食优先吃它，口粮顾问按它的单价算补货建议。
+staple_item_id = "meat"
+# 每天自动发的零花钱（按本地日期，一天一次）。
+daily_allowance = 30
+# 单个角色的携带上限（每种物品最多几件）。
+carry_max = 8
+# 每日消费上限（0 = 不限）；防止手滑把一整月的金币花在一件东西上。
+shop_daily_limit = 240
+# 饱食低于这个值她就想吃饭（落在「吃饱了」档内，见面板档位）。
+meal_threshold = 55.0
+# 口粮顾问：囤货视野（天）与"快见底"的告警阈值（天）。
+advisor_horizon_days = 7
+advisor_warn_days = 2.0
+# 新角色卡初始金币。
+start_sodas = 40
+# 日薪：每次发言的报酬、跨天首触的奖励、连续相处每天的加成、单次结算最多认几次发言。
+turn_reward = 0.6
+new_day_bonus = 4.0
+streak_reward = 0.7
+max_turns_per_session = 20
+
 [our_life.growth]
 # 每次用户发言的成长步长；同一会话内递减（session_diminish 控制递减强度）。
 turn_mood_gain = 2.5
@@ -40,13 +73,15 @@ session_diminish = 0.15
 day_greet_mood = 8.0
 day_greet_health = 2.0
 day_greet_affection = 3.0
-# 连续互动天数里程碑（每个只结算一次）。
+# 连续互动天数里程碑（每个只结算一次），以及对应的好感 / 心情 / 金币奖励。
 streak_milestones = [3, 7, 14, 30]
 streak_affection_bonus = [5.0, 8.0, 12.0, 20.0]
 streak_mood_bonus = [10.0, 10.0, 15.0, 20.0]
+streak_sodas_bonus = [5, 10, 20, 40]
 
 [our_life.neglect]
-# 冷落惩罚：超过 grace_hours 没互动后按天扣，且各有上限（不做不可逆清零）。
+# 冷落惩罚：超过 grace_hours 没互动后按天扣（只扣心情/健康/好感），且各有上限。
+# 饱食与精力不在这里扣——它们由作息与进食驱动，再扣一次就是双重惩罚。
 grace_hours = 24.0
 mood_penalty_per_day = 6.0
 health_penalty_per_day = 4.0
@@ -63,7 +98,14 @@ max_per_hour = 3
 max_chars = 320
 # 掉到危机档时是否让她主动开口（ai_behavior="respond"）。
 respond_on_crisis = true
+# 危机档判据（「不高于」该档即算危机）：心情 / 身体 / 肚子 / 精力。
 crisis_mood_tier = "sulking"
 crisis_health_tier = "sick"
+crisis_satiety_tier = "starving"
+crisis_energy_tier = "exhausted"
 # 她主动索取陪伴的冷却（秒）。
 company_cooldown_sec = 7200
+# 「她主动开口」的每小时上限（比 max_per_hour 更严，避免她一天里反复弹你）。
+respond_max_per_hour = 1
+# 她在睡觉时是否压住非危机注入（危机照旧允许）。
+quiet_during_sleep = true

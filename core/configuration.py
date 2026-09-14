@@ -3,23 +3,29 @@
 为什么单独一层：core/ 纯函数只接受已规范化的数值参数，不接受原始 dict；
 这样单测可以直接构造 `DecaySettings()`，不必伪造整份 TOML。
 
-分档阈值**不在**这里：它们固定在 `core/model.py` 的 `TIER_BOUNDS`，作为单一来源，
+分档阈值与模型常量**不在**这里：它们固定在 `core/model.py`
+（`TIER_BOUNDS` / `SATIETY_PER_HOUR_AWAKE` / `ENERGY_*` / 耦合阈值），作为单一来源，
 避免"配置改了阈值但代码/文档没跟上"这类漂移（DESIGN.md 已声明）。
+纪念日锚点同理固定在 `core/rhythm.py` 的 `ANNIVERSARY_DAYS`——面板显示的"还有 N 天"
+与届时真的触发事件必须是同一个判据，所以不能让它变成可配置项。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .coerce import as_bool, as_float, as_float_list, as_int, as_int_list, as_str, section
 
 __all__ = [
     "DecaySettings",
+    "EconomySettings",
     "GrowthSettings",
     "InjectSettings",
     "NeglectSettings",
     "OurLifeSettings",
+    "RhythmSettings",
+    "MAX_HORIZON_DAYS",
     "MAX_TICK_SECONDS",
     "MIN_TICK_SECONDS",
 ]
@@ -27,6 +33,9 @@ __all__ = [
 # tick 间隔下限：太密会白烧 CPU；上限：太疏则惰性衰减的折算粒度变粗。
 MIN_TICK_SECONDS = 5
 MAX_TICK_SECONDS = 3600
+
+# 口粮顾问的囤货视野上限（面板显示"建议囤到 N 天"，超过两周没有参考意义）
+MAX_HORIZON_DAYS = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +69,97 @@ class DecaySettings:
 
 
 @dataclass(frozen=True, slots=True)
+class RhythmSettings:
+    """作息：睡眠窗 + 纪念日奖励。
+
+    睡眠窗支持跨零点（`sleep_start_hour=24` 表示 24:00，等价于次日的 00:00）。
+    起止相同视为"整天都不睡"（`core/rhythm.is_sleep_hour` 会处理这个退化配置），
+    这样用户写错配置时她只是变成"永远清醒"，不会出现"整天都在睡觉"的荒谬状态。
+    """
+
+    sleep_start_hour: int = 24
+    sleep_end_hour: int = 8
+    anniversary_mood: float = 12.0
+    anniversary_affection: float = 5.0
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None) -> "RhythmSettings":
+        base = cls()
+        return cls(
+            sleep_start_hour=_hour(as_int(raw.get("sleep_start_hour") if raw else None, base.sleep_start_hour)),
+            sleep_end_hour=_hour(as_int(raw.get("sleep_end_hour") if raw else None, base.sleep_end_hour)),
+            anniversary_mood=as_float(
+                raw.get("anniversary_mood") if raw else None, base.anniversary_mood
+            ),
+            anniversary_affection=as_float(
+                raw.get("anniversary_affection") if raw else None, base.anniversary_affection
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EconomySettings:
+    """金币经济：日薪、口粮种类、携带与顾问口径。
+
+    `staple_item_id` 是"主人囤的那种口粮"——自动进食优先吃它、口粮顾问按它的单价
+    算"补足建议"。物品表本身（卖什么、什么效果、多少钱）固定在 `core/economy.py`，
+    是模型单一来源，不进配置。
+    """
+
+    enabled: bool = True
+    staple_item_id: str = "meat"
+    daily_allowance: int = 30
+    carry_max: int = 8
+    shop_daily_limit: int = 240
+    meal_threshold: float = 55.0
+    advisor_horizon_days: int = 7
+    advisor_warn_days: float = 2.0
+    start_sodas: int = 40
+    turn_reward: float = 0.6
+    new_day_bonus: float = 4.0
+    streak_reward: float = 0.7
+    max_turns_per_session: int = 20
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None) -> "EconomySettings":
+        base = cls()
+        return cls(
+            enabled=as_bool(raw.get("enabled") if raw else None, base.enabled),
+            staple_item_id=as_str(raw.get("staple_item_id") if raw else None, base.staple_item_id),
+            daily_allowance=max(
+                0, as_int(raw.get("daily_allowance") if raw else None, base.daily_allowance)
+            ),
+            carry_max=max(0, as_int(raw.get("carry_max") if raw else None, base.carry_max)),
+            shop_daily_limit=max(
+                0, as_int(raw.get("shop_daily_limit") if raw else None, base.shop_daily_limit)
+            ),
+            meal_threshold=_non_negative(
+                as_float(raw.get("meal_threshold") if raw else None, base.meal_threshold)
+            ),
+            advisor_horizon_days=min(
+                MAX_HORIZON_DAYS,
+                max(1, as_int(raw.get("advisor_horizon_days") if raw else None, base.advisor_horizon_days)),
+            ),
+            advisor_warn_days=_non_negative(
+                as_float(raw.get("advisor_warn_days") if raw else None, base.advisor_warn_days)
+            ),
+            start_sodas=max(0, as_int(raw.get("start_sodas") if raw else None, base.start_sodas)),
+            turn_reward=_non_negative(
+                as_float(raw.get("turn_reward") if raw else None, base.turn_reward)
+            ),
+            new_day_bonus=_non_negative(
+                as_float(raw.get("new_day_bonus") if raw else None, base.new_day_bonus)
+            ),
+            streak_reward=_non_negative(
+                as_float(raw.get("streak_reward") if raw else None, base.streak_reward)
+            ),
+            max_turns_per_session=max(
+                1, as_int(raw.get("max_turns_per_session") if raw else None, base.max_turns_per_session)
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class GrowthSettings:
     """互动成长步长与里程碑奖励。"""
 
@@ -73,6 +173,7 @@ class GrowthSettings:
     streak_milestones: tuple[int, ...] = (3, 7, 14, 30)
     streak_affection_bonus: tuple[float, ...] = (5.0, 8.0, 12.0, 20.0)
     streak_mood_bonus: tuple[float, ...] = (10.0, 10.0, 15.0, 20.0)
+    streak_sodas_bonus: tuple[int, ...] = (5, 10, 20, 40)
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> "GrowthSettings":
@@ -99,6 +200,9 @@ class GrowthSettings:
             ),
             streak_mood_bonus=as_float_list(
                 raw.get("streak_mood_bonus") if raw else None, base.streak_mood_bonus
+            ),
+            streak_sodas_bonus=as_int_list(
+                raw.get("streak_sodas_bonus") if raw else None, base.streak_sodas_bonus
             ),
         )
 
@@ -143,7 +247,7 @@ class NeglectSettings:
 
 @dataclass(frozen=True, slots=True)
 class InjectSettings:
-    """强注入的三重频控与危机升级。"""
+    """强注入的频控、危机升级与"她在睡觉"的静默窗。"""
 
     min_interval_sec: float = 1200.0
     max_per_hour: int = 3
@@ -151,7 +255,14 @@ class InjectSettings:
     respond_on_crisis: bool = True
     crisis_mood_tier: str = "sulking"
     crisis_health_tier: str = "sick"
+    crisis_satiety_tier: str = "starving"
+    crisis_energy_tier: str = "exhausted"
     company_cooldown_sec: float = 7200.0
+    # `respond`（让她主动开口）单独的小时上限：比 `max_per_hour` 更严，
+    # 否则"跨档 + 危机"叠加时会连着弹好几次主动开口（真机上很难受）
+    respond_max_per_hour: int = 1
+    # 她在睡觉时是否抑制**非危机**注入：凌晨三点把她叫醒说"我饿了"是反效果
+    quiet_during_sleep: bool = True
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> "InjectSettings":
@@ -169,9 +280,21 @@ class InjectSettings:
             crisis_health_tier=as_str(
                 raw.get("crisis_health_tier") if raw else None, base.crisis_health_tier
             ),
+            crisis_satiety_tier=as_str(
+                raw.get("crisis_satiety_tier") if raw else None, base.crisis_satiety_tier
+            ),
+            crisis_energy_tier=as_str(
+                raw.get("crisis_energy_tier") if raw else None, base.crisis_energy_tier
+            ),
             company_cooldown_sec=max(
                 0.0,
                 as_float(raw.get("company_cooldown_sec") if raw else None, base.company_cooldown_sec),
+            ),
+            respond_max_per_hour=max(
+                1, as_int(raw.get("respond_max_per_hour") if raw else None, base.respond_max_per_hour)
+            ),
+            quiet_during_sleep=as_bool(
+                raw.get("quiet_during_sleep") if raw else None, base.quiet_during_sleep
             ),
         )
 
@@ -182,10 +305,12 @@ class OurLifeSettings:
 
     enabled: bool = False
     tick_seconds: int = 30
-    decay: DecaySettings = DecaySettings()
-    growth: GrowthSettings = GrowthSettings()
-    neglect: NeglectSettings = NeglectSettings()
-    inject: InjectSettings = InjectSettings()
+    decay: DecaySettings = field(default_factory=DecaySettings)
+    rhythm: RhythmSettings = field(default_factory=RhythmSettings)
+    economy: EconomySettings = field(default_factory=EconomySettings)
+    growth: GrowthSettings = field(default_factory=GrowthSettings)
+    neglect: NeglectSettings = field(default_factory=NeglectSettings)
+    inject: InjectSettings = field(default_factory=InjectSettings)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any] | None) -> "OurLifeSettings":
@@ -196,6 +321,8 @@ class OurLifeSettings:
             enabled=as_bool(root.get("enabled"), base.enabled),
             tick_seconds=_clamp_tick(as_int(root.get("tick_seconds"), base.tick_seconds)),
             decay=DecaySettings.from_mapping(section(config, "our_life", "decay")),
+            rhythm=RhythmSettings.from_mapping(section(config, "our_life", "rhythm")),
+            economy=EconomySettings.from_mapping(section(config, "our_life", "economy")),
             growth=GrowthSettings.from_mapping(section(config, "our_life", "growth")),
             neglect=NeglectSettings.from_mapping(section(config, "our_life", "neglect")),
             inject=InjectSettings.from_mapping(section(config, "our_life", "inject")),
@@ -208,6 +335,11 @@ def _positive(value: float) -> float:
 
 def _non_negative(value: float) -> float:
     return value if value > 0.0 else 0.0
+
+
+def _hour(value: int) -> int:
+    """把小时夹到 0..24（24 = 当天结束，等价于次日 00:00）。"""
+    return max(0, min(24, int(value)))
 
 
 def _clamp_tick(value: int) -> int:

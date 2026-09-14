@@ -85,7 +85,13 @@ def test_status_reports_loaded_code_and_tiers(make_plugin: Any, run_async: Any) 
     result = run_async(plugin.status_entry(_ctx={"lanlan_name": "灵"}))
     value = result.value
     assert value["note"] == "stats_loaded"
-    assert value["tiers"] == {"affection": "bonded", "mood": "sulking", "health": "fair"}
+    assert value["tiers"] == {
+        "energy": "charged",
+        "satiety": "full",
+        "mood": "sulking",
+        "health": "fair",
+        "affection": "bonded",
+    }
     assert value["streak_days"] == 3
 
 
@@ -158,7 +164,13 @@ def test_disabled_freezes_stats_and_sends_nothing(
     payload = host.store.data[SHARD_KEY]
     # 冻结 + 不写盘：整份持久化状态与启动后逐字段一致（禁用期不该每拍写一次 store）
     assert payload == persisted_after_startup
-    assert payload["stats"] == {"affection": 30.0, "mood": 60.0, "health": 70.0}
+    assert payload["stats"] == {
+        "energy": 80.0,
+        "satiety": 70.0,
+        "mood": 60.0,
+        "health": 70.0,
+        "affection": 30.0,
+    }
     # 但内存里的折算基准点要往前推，免得重新打开时补算一大段衰减
     assert plugin._store.cached["灵"].last_decay_at == now
     assert host.pushed == []
@@ -339,7 +351,9 @@ def test_first_decay_tick_would_inject_with_a_hard_comparison(
     after = apply_decay(before, elapsed_hours=30.0 / 3600.0, decay=DecaySettings())
     assert before.affection == 20.0
     assert after.affection < 20.0
-    assert tier_transitions(before, after) == (("affection", "acquainted", "stranger"),)
+    hard = tier_transitions(before, after)
+    # 五轴下这一拍也会把精力折过 80 那条线；本条门只关心"好感确实越过了分界线"
+    assert ("affection", "acquainted", "stranger") in hard
 
 
 def test_status_bootstraps_a_shard_so_the_tick_has_a_role(make_plugin: Any, run_async: Any) -> None:
@@ -616,3 +630,406 @@ class _ToggleConfig:
 
 def _cfg(*, enabled: bool) -> Any:
     return _ToggleConfig(enabled=enabled)
+
+
+# ---------------------------------------------------------------------------
+# v0.2.0「过日子」：口粮 / 金币 / 商店 / 照料 / 顾问 / 睡觉静默
+# ---------------------------------------------------------------------------
+#
+# 这一组是"她每天自己吃背包里的口粮"这条主线的守门人：
+# 主人囤得够 = 数值撑得住；囤的吃完而没回来 = 真的会饿。
+# 所有断言都走**入口/tick 的对外可观察结果**（store 里落了什么、推送了什么），
+# 而不是直接调内部函数——内部函数有自己的纯函数门（test_economy / test_model）。
+
+
+def _v2_payload(
+    *,
+    now: float,
+    satiety: float = 70.0,
+    energy: float = 80.0,
+    inventory: dict[str, int] | None = None,
+    sodas: int = 0,
+    last_decay_at: float | None = None,
+) -> dict[str, Any]:
+    """一份 v0.2.0 形状的分片；默认只有五项数值与空背包。"""
+    payload = _shard_payload(now=now)
+    payload["schema_version"] = 2
+    payload["stats"] = {
+        "affection": 30.0,
+        "mood": 60.0,
+        "health": 70.0,
+        "satiety": satiety,
+        "energy": energy,
+    }
+    payload["last_decay_at"] = now if last_decay_at is None else last_decay_at
+    payload["inventory"] = dict(inventory or {})
+    payload["sodas"] = sodas
+    payload["account_date"] = ""
+    payload["daily_allowance_granted"] = False
+    payload["daily_spent"] = 0
+    payload["meal_days"] = []
+    payload["meals_total"] = 0
+    payload["last_meal_at"] = None
+    return payload
+
+
+def _hunger_offset_hours(rhythm: Any, *, seconds_at_sleep: float = 42.0) -> float:
+    """为了跨过饱食阈值需要折算多少秒（只按清醒时段算）。
+
+    默认睡眠窗是 24:00-08:00，所以测试若在白天跑就是各 4.0 分/小时；
+    万一恰好跑在睡眠时段（比如凌晨本地时间），就用睡眠速率算，测试不会因钟点而红。
+    """
+    rate = 1.5 if rhythm.sleeping else 4.0
+    return (seconds_at_sleep / rate) * 3600.0
+
+
+def test_tick_feeds_her_from_the_bag(make_plugin: Any, run_async: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """她在饿到阈值以下时**自己**从背包吃掉一份口粮，并记账（餐数 / 库存 / 上次吃饭）。"""
+    now = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    rhythm = plugin._rhythm(now=now)
+    elapsed = _hunger_offset_hours(rhythm)
+    host.store.data[SHARD_KEY] = _v2_payload(
+        now=now, satiety=55.0, inventory={"meat": 2}, last_decay_at=now - elapsed
+    )
+
+    run_async(plugin.on_startup())
+    run_async(plugin.on_tick())
+
+    payload = host.store.data[SHARD_KEY]
+    assert payload["inventory"] == {"meat": 1}, "她该吃掉一份口粮"
+    assert payload["stats"]["satiety"] > 55.0, "吃完要回上来"
+    assert payload["meals_total"] == 1
+    assert payload["last_meal_at"] == now
+    assert payload["meal_days"], "账本要记当天吃了饭"
+
+
+def test_tick_does_not_feed_when_the_bag_is_empty(
+    make_plugin: Any, run_async: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """口粮吃完 = 真的会饿：饱食继续掉，背包还是空的，账本不动。"""
+    now = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    rhythm = plugin._rhythm(now=now)
+    elapsed = _hunger_offset_hours(rhythm)
+    host.store.data[SHARD_KEY] = _v2_payload(
+        now=now, satiety=55.0, inventory={}, last_decay_at=now - elapsed
+    )
+
+    run_async(plugin.on_startup())
+    run_async(plugin.on_tick())
+
+    payload = host.store.data[SHARD_KEY]
+    assert payload["inventory"] == {}
+    assert payload["stats"]["satiety"] < 55.0, "没粮就该继续掉"
+    assert payload["meals_total"] == 0
+
+
+def test_tick_does_not_feed_her_when_she_is_not_hungry(
+    make_plugin: Any, run_async: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    host.store.data[SHARD_KEY] = _v2_payload(now=now, satiety=95.0, inventory={"meat": 5})
+
+    run_async(plugin.on_startup())
+    run_async(plugin.on_tick())
+
+    assert host.store.data[SHARD_KEY]["inventory"] == {"meat": 5}
+    assert host.store.data[SHARD_KEY]["meals_total"] == 0
+
+
+def test_tick_pays_the_daily_wage_and_the_allowance(
+    make_plugin: Any, run_async: Any, conversation: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """金币来源：发言日薪 + 当日零花钱 + 连续相处加成。"""
+    now = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    plugin, host = make_plugin(
+        config=_cfg(enabled=True), records=[conversation("c1", now, "灵", "user")]
+    )
+    host.store.data[SHARD_KEY] = _v2_payload(now=now, satiety=95.0)
+
+    run_async(plugin.on_startup())
+    run_async(plugin.on_tick())
+
+    payload = host.store.data[SHARD_KEY]
+    # 当日零花 30 + 跨天首触 4 + 连续第 1 天加成 0 + 一次发言 0.6 → 四舍五入 35
+    assert payload["sodas"] == 35
+    assert payload["daily_allowance_granted"] is True
+
+
+def test_daily_allowance_is_granted_once_per_day(
+    make_plugin: Any, run_async: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    host.store.data[SHARD_KEY] = _v2_payload(now=now, satiety=95.0, sodas=10)
+
+    run_async(plugin.on_startup())
+    run_async(plugin.on_tick())
+    first = host.store.data[SHARD_KEY]["sodas"]
+    run_async(plugin.on_tick())
+
+    assert host.store.data[SHARD_KEY]["sodas"] == first, "同一天不该反复发零花钱"
+
+
+def test_tick_feeds_her_even_while_she_sleeps(
+    make_plugin: Any, run_async: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """睡觉不影响进食：只有"饿到阈值"这一道闸。
+
+    否则默认睡眠窗（8 小时掉 12 分）会把饱食压到阈值以下，她一醒来就同时"饿着"且
+    "今天还没吃过"，账面对不上；现在她睡前/醒来各吃一顿，面板上读得通。
+    """
+    now = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+
+    class _Asleep:
+        sleeping = True
+        awake_ratio = 0.0
+        hours_to_sleep = 0.0
+        hours_to_wake = 300.0
+        phase = "night"
+        date_iso = "2027-01-15"
+
+    monkeypatch.setattr(plugin, "_rhythm", lambda **kwargs: _Asleep())
+    host.store.data[SHARD_KEY] = _v2_payload(now=now, satiety=50.0, inventory={"meat": 3})
+
+    run_async(plugin.on_startup())
+    run_async(plugin.on_tick())
+
+    payload = host.store.data[SHARD_KEY]
+    assert payload["inventory"] == {"meat": 2}, "饿到阈值以下就该吃，睡觉也一样"
+    assert payload["meals_total"] == 1
+
+
+def test_shop_buys_and_pays(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    now = 1_800_000_000.0
+    host.store.data[SHARD_KEY] = _v2_payload(now=now, sodas=100)
+
+    result = run_async(plugin.shop_entry(item="meat", quantity=3, _ctx={"lanlan_name": "灵"}))
+
+    assert result.is_ok()
+    assert result.value["inventory"] == {"meat": 3}
+    assert result.value["sodas"] == 100 - 3 * 6
+    assert host.store.data[SHARD_KEY]["daily_spent"] == 18
+
+
+def test_shop_rejects_with_stable_codes(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    now = 1_800_000_000.0
+    host.store.data[SHARD_KEY] = _v2_payload(now=now, sodas=5)
+
+    broke = run_async(plugin.shop_entry(item="gift", quantity=1, _ctx={"lanlan_name": "灵"}))
+    assert not broke.is_ok()
+    assert str(broke.error) == "insufficient_sodas"
+
+    unknown = run_async(plugin.shop_entry(item="gold_apple", quantity=1, _ctx={"lanlan_name": "灵"}))
+    assert str(unknown.error) == "unknown_item"  # 商店侧的稳定码；照料入口用的是 invalid_item
+
+    zero = run_async(plugin.shop_entry(item="meat", quantity=0, _ctx={"lanlan_name": "灵"}))
+    assert str(zero.error) == "invalid_quantity"
+
+
+def test_shop_enforces_the_carry_cap(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    now = 1_800_000_000.0
+    host.store.data[SHARD_KEY] = _v2_payload(now=now, sodas=999)
+
+    ok = run_async(plugin.shop_entry(item="medicine", quantity=5, _ctx={"lanlan_name": "灵"}))
+    assert ok.is_ok()
+    too_many = run_async(plugin.shop_entry(item="medicine", quantity=1, _ctx={"lanlan_name": "灵"}))
+    assert not too_many.is_ok()
+    assert str(too_many.error) == "carry_full"
+
+
+def test_feed_uses_one_item_and_applies_its_effect(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    now = 1_800_000_000.0
+    host.store.data[SHARD_KEY] = _v2_payload(now=now, satiety=50.0, inventory={"meat": 1})
+
+    result = run_async(plugin.feed_entry(item="meat", _ctx={"lanlan_name": "灵"}))
+
+    assert result.is_ok()
+    assert host.store.data[SHARD_KEY]["inventory"] == {}
+    assert host.store.data[SHARD_KEY]["meals_total"] == 1, "主动喂饭也要记进餐数"
+
+
+def test_feed_rejects_unknown_items_and_empty_bags(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    host.store.data[SHARD_KEY] = _v2_payload(now=1_800_000_000.0, inventory={})
+
+    unknown = run_async(plugin.feed_entry(item="nothing", _ctx={"lanlan_name": "灵"}))
+    assert str(unknown.error) == "invalid_item"
+
+    out_of_stock = run_async(plugin.feed_entry(item="meat", _ctx={"lanlan_name": "灵"}))
+    assert str(out_of_stock.error) == "invalid_item"
+
+
+def test_allowance_clamps_at_zero(make_plugin: Any, run_async: Any) -> None:
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    host.store.data[SHARD_KEY] = _v2_payload(now=1_800_000_000.0, sodas=5)
+
+    run_async(plugin.allowance_entry(amount=-50, _ctx={"lanlan_name": "灵"}))
+    assert host.store.data[SHARD_KEY]["sodas"] == 0
+
+    added = run_async(plugin.allowance_entry(amount=12, _ctx={"lanlan_name": "灵"}))
+    assert added.value["sodas"] == 12
+
+
+def test_advisor_entry_explains_her_daily_appetite(make_plugin: Any, run_async: Any) -> None:
+    """"她每天吃多少 / 还能撑几天 / 该补多少"是面板给主人的账，必须是真实推算出来的。"""
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    now = 1_800_000_000.0
+    host.store.data[SHARD_KEY] = _v2_payload(now=now, inventory={"meat": 4}, sodas=40)
+
+    result = run_async(plugin.advisor_entry(_ctx={"lanlan_name": "灵"}))
+
+    assert result.is_ok()
+    advisor = result.value["advisor"]
+    assert advisor["meal_need_per_day"] > 1.0, "每天至少也要吃一顿"
+    assert advisor["stock_meals"] == 4
+    # 面板读数只保留两位小数，所以按绝对值比对
+    assert advisor["days_remaining"] == pytest.approx(4 / advisor["meals_per_day"], abs=0.01)
+    assert advisor["urgent"] is True, "只够一两天就该告警"
+    assert result.value["phase"] in {
+        "morning",
+        "forenoon",
+        "noon",
+        "afternoon",
+        "evening",
+        "night",
+        "late_night",
+    }
+
+
+def test_advisor_tracks_how_much_she_actually_ate(
+    make_plugin: Any, run_async: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """实测餐数进顾问：吃过的日子会被算进"每天几餐"。"""
+    now = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    payload = _v2_payload(now=now, satiety=30.0, inventory={"meat": 3})
+    payload["meal_days"] = [["2027-01-14", 3], ["2027-01-15", 3]]
+    host.store.data[SHARD_KEY] = payload
+
+    result = run_async(plugin.advisor_entry(_ctx={"lanlan_name": "灵"}))
+
+    assert result.value["advisor"]["observed_meals_per_day"] == pytest.approx(3.0)
+    assert result.value["advisor"]["meals_per_day"] >= 3.0
+
+
+def test_sleep_silences_non_crisis_injections(
+    make_plugin: Any, run_async: Any, conversation: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """她在睡觉时不该被"跨档/首触"叫醒（危机类例外，由下一条门负责）。"""
+    now = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    plugin, host = make_plugin(
+        config=_cfg(enabled=True), records=[conversation("c1", now, "灵", "user")]
+    )
+
+    class _Asleep:
+        sleeping = True
+        awake_ratio = 0.0
+        hours_to_sleep = 0.0
+        hours_to_wake = 300.0
+        phase = "night"
+        date_iso = "2027-01-15"
+
+    monkeypatch.setattr(plugin, "_rhythm", lambda **kwargs: _Asleep())
+    host.store.data[SHARD_KEY] = _v2_payload(now=now, satiety=95.0)
+
+    run_async(plugin.on_startup())
+    run_async(plugin.on_tick())
+
+    assert host.pushed == [], "睡觉时不该推送非危机注入"
+
+
+def test_starving_speaks_up_even_while_sleeping(
+    make_plugin: Any, run_async: Any, conversation: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真饿坏了就是危机：睡觉也允许她开口（否则"她会饿"就没人知道）。"""
+    now = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    plugin, host = make_plugin(
+        config=_cfg(enabled=True), records=[conversation("c1", now, "灵", "user")]
+    )
+
+    class _Asleep:
+        sleeping = True
+        awake_ratio = 0.0
+        hours_to_sleep = 0.0
+        hours_to_wake = 300.0
+        phase = "night"
+        date_iso = "2027-01-15"
+
+    monkeypatch.setattr(plugin, "_rhythm", lambda **kwargs: _Asleep())
+    host.store.data[SHARD_KEY] = _v2_payload(now=now, satiety=5.0, inventory={})
+
+    run_async(plugin.on_startup())
+    run_async(plugin.on_tick())
+
+    assert host.pushed, "饿坏了应当触发注入"
+    assert host.store.data[SHARD_KEY]["inject_history"][-1]["trigger"] == "hungry"
+
+
+def test_v1_shard_is_read_with_v2_defaults(make_plugin: Any, run_async: Any) -> None:
+    """真机升级路径：v0.1.0 的三轴分片必须能直接读进来（补默认值，不报废、不迁移报错）。"""
+    plugin, host = make_plugin(config=_cfg(enabled=True))
+    now = 1_800_000_000.0
+    host.store.data[SHARD_KEY] = _shard_payload(now=now)  # v1 形状：没有饱食/精力/金币/背包
+
+    result = run_async(plugin.status_entry(_ctx={"lanlan_name": "灵"}))
+
+    assert result.is_ok()
+    assert result.value["satiety"] == 70.0
+    assert result.value["energy"] == 80.0
+    assert result.value["sodas"] == 40  # start_sodas
+    assert result.value["inventory"] == {}
+
+
+def test_anniversary_is_granted_once_and_then_mentioned(
+    make_plugin: Any, run_async: Any, conversation: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """相处第 3 天：给一次性礼物并让模型知道今天是纪念日（同一天只给一次）。"""
+    now = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    plugin, host = make_plugin(
+        config=_cfg(enabled=True), records=[conversation("c1", now, "灵", "user")]
+    )
+    payload = _v2_payload(now=now, satiety=95.0)
+    today = _local_day_of(now)
+    payload["first_day"] = _days_before(today, 2)  # 相处第 3 天（相遇当天算第 1 天）
+    host.store.data[SHARD_KEY] = payload
+
+    run_async(plugin.on_startup())
+    run_async(plugin.on_tick())
+    first = host.store.data[SHARD_KEY]
+
+    assert first["day_number_seen"] == 3, "相处天数要按相遇日算出来"
+    assert first["inject_history"][-1]["trigger"] == "anniversary"
+    # 同一天再结算一次：不再重复给礼物，也不再重复注入
+    pushes = len(host.pushed)
+    run_async(plugin.on_tick())
+    assert len(host.pushed) == pushes
+
+
+def _local_day_of(timestamp: float) -> str:
+    from our_life.core.behavior import local_day
+
+    return local_day(timestamp)
+
+
+def _days_before(day: str, offset: int) -> str:
+    from datetime import date, timedelta
+
+    return (date.fromisoformat(day) - timedelta(days=offset)).isoformat()
