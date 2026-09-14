@@ -84,6 +84,25 @@ type AdvisorView = {
   empty?: boolean
 }
 
+type JudgmentRecord = {
+  at?: number
+  label?: string
+  applied?: number
+}
+
+type FeedbackView = {
+  enabled?: boolean
+  daily_add_points?: number
+  daily_subtract_points?: number
+  used_add?: number
+  used_subtract?: number
+  remaining_add?: number
+  remaining_subtract?: number
+  count_today?: number
+  last_judgment_at?: number | null
+  history?: JudgmentRecord[]
+}
+
 type RuntimeView = {
   rhythm?: Record<string, any>
   phase?: string
@@ -95,6 +114,7 @@ type RuntimeView = {
   crisis_axes?: string[]
   day_number?: number
   anniversary?: { kind?: string; day_number?: number; years?: number } | null
+  feedback?: FeedbackView
 }
 
 type ShopEntry = {
@@ -189,6 +209,8 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   const snapshot = state?.state ?? null
   const runtime = state?.runtime ?? {}
   const advisor = runtime.advisor ?? {}
+  const feedback: FeedbackView = runtime.feedback ?? {}
+  const judgmentHistory = feedback.history ?? []
   const enabled = state?.enabled === true
   const config = state?.config ?? {}
   const tiers = snapshot?.tiers ?? {}
@@ -525,10 +547,59 @@ export default function Panel(props: PluginSurfaceProps<State>) {
               </Stack>
             </Card>
 
+            <Card title={t("panel.section.feedback")}>
+              <Stack gap={12}>
+                <KeyValue
+                  items={[
+                    {
+                      key: "count",
+                      label: t("panel.field.feedbackCount"),
+                      value: String(feedback.count_today ?? 0),
+                    },
+                    {
+                      key: "quota",
+                      label: t("panel.field.feedbackQuota"),
+                      value: `${(feedback.remaining_add ?? 0).toFixed(1)} / ${(
+                        feedback.remaining_subtract ?? 0
+                      ).toFixed(1)}`,
+                    },
+                    {
+                      key: "last",
+                      label: t("panel.field.feedbackLast"),
+                      value: formatTime(feedback.last_judgment_at, t("panel.never")),
+                    },
+                  ]}
+                />
+                {judgmentHistory.length > 0 ? (
+                  <DataTable
+                    rowKey="at"
+                    data={judgmentHistory}
+                    emptyText={t("panel.never")}
+                    columns={[
+                      {
+                        key: "at",
+                        label: t("panel.field.time"),
+                        render: (row: JudgmentRecord) => formatTime(row.at, "-"),
+                      },
+                      {
+                        key: "label",
+                        label: t("panel.field.judgment"),
+                        render: (row: JudgmentRecord) =>
+                          t(`panel.judgment.${row.label ?? "neutral"}`, {
+                            defaultValue: row.label ?? "-",
+                          }),
+                      },
+                    ]}
+                  />
+                ) : (
+                  <Text>{t("panel.feedbackHint")}</Text>
+                )}
+              </Stack>
+            </Card>
+
             <Card title={t("panel.section.tune")}>
               <Stack gap={12}>
-                <Field label={t("panel.field.stat")} help={t("panel.tuneHelp")}>
-                  <Select value={tuneStat} options={statOptions} onChange={(next: any) => setTuneStat(String(next))} />
+                <Field label={t("panel.field.stat")} help={t("panel.tuneHelp")}>                  <Select value={tuneStat} options={statOptions} onChange={(next: any) => setTuneStat(String(next))} />
                 </Field>
                 <Field label={t("panel.field.value")}>
                   <NumberInput

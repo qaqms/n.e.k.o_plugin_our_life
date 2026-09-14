@@ -25,7 +25,7 @@ keywords = [
     "tamagotchi",
     "care",
 ]
-version = "0.2.0"
+version = "0.3.0"
 type = "plugin"
 entry = "plugin.plugins.our_life:OurLifePlugin"
 
@@ -138,6 +138,21 @@ streak_milestones = [3, 7, 14, 30]
 streak_affection_bonus = [5.0, 8.0, 12.0, 20.0]
 streak_mood_bonus = [10.0, 10.0, 15.0, 20.0]
 streak_sodas_bonus = [5, 10, 20, 40]
+
+[our_life.feedback]
+# 反馈闭环（v0.3.0）：她自己判断"刚才那轮聊得怎么样"，回流成**有上限的修正项**。
+# 为什么要它：成长只按发言条数算，连发 20 条「嗯」和认真聊 20 句拿到一样的步长。
+# 四条闸门（单次幅度、会话递减、每日上限、需要真实互动作前提）固定在
+# core/judgment.py，这里只露"上限类"旋钮——单次幅度是 turn_*_gain 的引用，不进配置。
+enabled = true
+# 当日"正向修正"预算（单位是心情分，健康/好感按比例同向缩小）。
+# 默认 8.0 约合她报 3 次「特别开心」，远小于一天真实互动能给的量。
+daily_add_points = 8.0
+# 当日"负向修正"预算：刻意比正向小一半。让工具能扣分等于给模型一条惩罚通道，
+# 所以它只能是"这轮聊得敷衍"的轻微表达，不可能把一个角色卡刷成闹脾气。
+daily_subtract_points = 4.0
+# 同一会话内第 n 次判断的递减强度：权重 × 1/(1 + n*damp)。
+session_damp = 0.5
 
 [our_life.neglect]
 # 冷落惩罚（拟真、惩罚式）：超过 grace_hours 没互动，按天扣（只扣心情/健康/好感），

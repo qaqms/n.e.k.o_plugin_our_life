@@ -24,6 +24,7 @@ from our_life.core.injection import (
     TRIGGER_DAILY_GREET,
     TRIGGER_HUNGRY,
     TRIGGER_INTERVAL,
+    TRIGGER_JUDGMENT,
     TRIGGER_TIER_CHANGE,
     TRIGGER_TIRED,
 )
@@ -189,6 +190,7 @@ def test_trigger_keys_exist_for_every_trigger() -> None:
         TRIGGER_HUNGRY,
         TRIGGER_TIRED,
         TRIGGER_ANNIVERSARY,
+        TRIGGER_JUDGMENT,
     )
     for locale in LOCALES:
         messages = _load(locale)

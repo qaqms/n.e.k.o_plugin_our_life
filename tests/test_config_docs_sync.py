@@ -19,6 +19,7 @@ from typing import Any, Mapping
 from our_life.core.configuration import (
     DecaySettings,
     EconomySettings,
+    FeedbackSettings,
     GrowthSettings,
     InjectSettings,
     NeglectSettings,
@@ -33,6 +34,7 @@ SUB_SECTIONS = (
     ("rhythm", RhythmSettings),
     ("economy", EconomySettings),
     ("growth", GrowthSettings),
+    ("feedback", FeedbackSettings),
     ("neglect", NeglectSettings),
     ("inject", InjectSettings),
 )
@@ -185,4 +187,57 @@ def test_meal_threshold_sits_inside_the_satisfied_band() -> None:
     threshold = OurLifeSettings().economy.meal_threshold
     assert TIER_BOUNDS[2] <= threshold < TIER_BOUNDS[3], (
         f"meal_threshold={threshold} is outside the satisfied tier band"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 跨层一致性：反馈闭环的两条不变式（第 ①③ 条闸门的配置面）
+# ---------------------------------------------------------------------------
+
+
+def test_feedback_correction_can_never_outweigh_a_real_turn() -> None:
+    """闸门 ① 的不变式：**她报一次开心的分量必须小于主人多说一句话的分量**。
+
+    这是整个反馈闭环的安全底线——工具再被滥用也压不过真实互动。
+    它由 `core/judgment._TURN_GAIN_SCALE < 1` 保证，而这里把它钉在门上：
+    单次判断的最大修正量（权重 1.0 的标签、会话首次、不计递减）必须 < `turn_mood_gain`。
+    """
+    from our_life.core.judgment import JUDGMENT_WEIGHTS, judge
+
+    settings = OurLifeSettings()
+    # 会话首次（session_turns=0）时递减系数为 1，所以这就是单次最大幅度
+    result = judge(
+        label="wonderful",
+        strength=1.0,
+        feedback=settings.feedback,
+        growth=settings.growth,
+        enabled=True,
+        last_touch_at=1000.0,
+        last_judgment_at=None,
+        session_turns=0,
+        day_used_add=0.0,
+        day_used_subtract=0.0,
+    )
+    assert result.applied
+    assert abs(result.mood) < settings.growth.turn_mood_gain, (
+        "a single judgment must stay strictly below one real turn's growth "
+        f"(judgment={result.mood}, turn={settings.growth.turn_mood_gain})"
+    )
+    assert abs(result.health) < settings.growth.turn_health_gain
+    assert abs(result.affection) < settings.growth.turn_affection_gain
+    # 权重表本身也要能自证：最大正向标签的权重是 1.0，其余都不超过它
+    assert max(JUDGMENT_WEIGHTS.values()) == 1.0
+
+
+def test_feedback_negative_budget_is_not_larger_than_the_positive_one() -> None:
+    """闸门 ③ 的不变式：**负向额度不许超过正向**。
+
+    让工具能扣分等于给模型一条惩罚通道，所以负向天花板刻意只有正向的一半。
+    谁把 `daily_subtract_points` 调过头，这条门会红——那是有意的。
+    """
+    feedback = OurLifeSettings().feedback
+    assert feedback.daily_add_points > 0.0, "正向预算为 0 等于反馈闭环形同关闭"
+    assert 0.0 <= feedback.daily_subtract_points <= feedback.daily_add_points, (
+        "the negative budget must not rival the positive one: "
+        f"add={feedback.daily_add_points} subtract={feedback.daily_subtract_points}"
     )

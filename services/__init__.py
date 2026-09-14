@@ -9,6 +9,7 @@ from .injector import DRIFT_THRESHOLD, InjectionPlan, Injector
 from .sampler import BehaviorSampler
 from .state import (
     INJECT_HISTORY_MAX,
+    JUDGMENT_HISTORY_MAX,
     KEY_PREFIX,
     MEAL_DAYS_KEEP,
     SEEN_IDS_MAX,
@@ -24,6 +25,7 @@ __all__ = [
     "BehaviorSampler",
     "DRIFT_THRESHOLD",
     "INJECT_HISTORY_MAX",
+    "JUDGMENT_HISTORY_MAX",
     "InjectionPlan",
     "Injector",
     "KEY_PREFIX",

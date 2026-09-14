@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Iterable, Sequence
 
 from .configuration import InjectSettings
+from .judgment import label_line
 from .model import Stats, is_crisis, tier_index_of, tier_of
 from .rhythm import Anniversary, DailyRhythm
 
@@ -39,6 +40,7 @@ __all__ = [
     "TRIGGER_DAILY_GREET",
     "TRIGGER_HUNGRY",
     "TRIGGER_INTERVAL",
+    "TRIGGER_JUDGMENT",
     "TRIGGER_TIER_CHANGE",
     "TRIGGER_TIRED",
     "build_text",
@@ -53,6 +55,9 @@ TRIGGER_COMPANY = "company"
 TRIGGER_HUNGRY = "hungry"
 TRIGGER_TIRED = "tired"
 TRIGGER_ANNIVERSARY = "anniversary"
+# 反馈闭环（v0.3.0）：她自己判断"刚才那轮聊得怎么样"，把这个感受进她自己的上下文。
+# 它不是"数值事件"而是"她的一句话"——所以正文里只写感受，不写改了多少（见 core/judgment.py）。
+TRIGGER_JUDGMENT = "judgment"
 
 TIER_LABELS_ZH: dict[str, dict[str, str]] = {
     "affection": {
@@ -197,7 +202,6 @@ def resolve_ai_behavior(trigger: str, stats: Stats, inject: InjectSettings) -> s
         return "read"
     return "read"
 
-
 def build_text(
     *,
     stats: Stats,
@@ -209,8 +213,13 @@ def build_text(
     rhythm: "DailyRhythm | None" = None,
     anniversary: "Anniversary | None" = None,
     day_number: int = 0,
+    judgment_label: str = "",
 ) -> str:
-    """装配注入正文。`transitions` 是 `core.model.tier_transitions` 的输出。"""
+    """装配注入正文。`transitions` 是 `core.model.tier_transitions` 的输出。
+
+    `judgment_label` 只在 `trigger=TRIGGER_JUDGMENT` 时有意义（v0.3.0 反馈闭环）：
+    她自己的判断以"一句感受"进上下文，**不带任何数字与档名**。
+    """
     required: list[str] = [_HEADER]
 
     for stat, label in _BODY_LINES:
@@ -238,7 +247,7 @@ def build_text(
     if gap_line:
         optional.append(f"　{gap_line}")
 
-    event_line = _event_line(trigger, transitions, anniversary)
+    event_line = _event_line(trigger, transitions, anniversary, judgment_label=judgment_label)
     if event_line:
         optional.append(f"　刚刚发生：{event_line}")
 
@@ -320,7 +329,13 @@ def _event_line(
     trigger: str,
     transitions: Iterable[tuple[str, str, str]],
     anniversary: "Anniversary | None" = None,
+    *,
+    judgment_label: str = "",
 ) -> str:
+    if trigger == TRIGGER_JUDGMENT:
+        # 反馈闭环：她自己的判断。`label_line` 只给"一句感受"，没有数字与档名
+        # （`neutral` 没有对应句子，返回空串 → 交回下面的兜底）。
+        return label_line(judgment_label) or "你刚刚回味了一下和 {MASTER_NAME} 的这次相处"
     if trigger == TRIGGER_ANNIVERSARY:
         if anniversary is not None and anniversary.repeats_annually:
             return "今天是你们的周年纪念日"

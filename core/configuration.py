@@ -20,6 +20,7 @@ from .coerce import as_bool, as_float, as_float_list, as_int, as_int_list, as_st
 __all__ = [
     "DecaySettings",
     "EconomySettings",
+    "FeedbackSettings",
     "GrowthSettings",
     "InjectSettings",
     "NeglectSettings",
@@ -208,6 +209,42 @@ class GrowthSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class FeedbackSettings:
+    """反馈闭环：她自己的判断回流成数值修正的**四道旋钮**（v0.3.0）。
+
+    这里只放"上限类"旋钮——**单次幅度是 `growth.turn_*_gain` 的引用**
+    （`core/judgment._TURN_GAIN_SCALE`），不进配置：那条不变式是"她的判断压不过
+    一次真实互动"，把它变成可配置项就等于允许用户把它调坏。
+
+    两个日预算是正向/负向**分开**的：让工具能扣分等于给模型一条惩罚通道，
+    所以负向的天花板默认只有正向的一半（4.0 vs 8.0），且同样需要真实互动作前提。
+    """
+
+    enabled: bool = True
+    daily_add_points: float = 8.0
+    daily_subtract_points: float = 4.0
+    session_damp: float = 0.5
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None) -> "FeedbackSettings":
+        base = cls()
+        return cls(
+            enabled=as_bool(raw.get("enabled") if raw else None, base.enabled),
+            daily_add_points=_non_negative(
+                as_float(raw.get("daily_add_points") if raw else None, base.daily_add_points)
+            ),
+            daily_subtract_points=_non_negative(
+                as_float(
+                    raw.get("daily_subtract_points") if raw else None, base.daily_subtract_points
+                )
+            ),
+            session_damp=max(
+                0.0, as_float(raw.get("session_damp") if raw else None, base.session_damp)
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class NeglectSettings:
     """冷落惩罚（拟真、按天、有上限）。"""
 
@@ -309,6 +346,7 @@ class OurLifeSettings:
     rhythm: RhythmSettings = field(default_factory=RhythmSettings)
     economy: EconomySettings = field(default_factory=EconomySettings)
     growth: GrowthSettings = field(default_factory=GrowthSettings)
+    feedback: FeedbackSettings = field(default_factory=FeedbackSettings)
     neglect: NeglectSettings = field(default_factory=NeglectSettings)
     inject: InjectSettings = field(default_factory=InjectSettings)
 
@@ -324,6 +362,7 @@ class OurLifeSettings:
             rhythm=RhythmSettings.from_mapping(section(config, "our_life", "rhythm")),
             economy=EconomySettings.from_mapping(section(config, "our_life", "economy")),
             growth=GrowthSettings.from_mapping(section(config, "our_life", "growth")),
+            feedback=FeedbackSettings.from_mapping(section(config, "our_life", "feedback")),
             neglect=NeglectSettings.from_mapping(section(config, "our_life", "neglect")),
             inject=InjectSettings.from_mapping(section(config, "our_life", "inject")),
         )

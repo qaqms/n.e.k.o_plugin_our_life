@@ -9,13 +9,15 @@
   重新算成"新互动"，凭空刷一波数值。
 - 该存的东西一律 JSON 安全（dict/list/str/num/bool/None），因为 store 会直接序列化。
 
-**schema 版本与向后兼容**（v0.2.0 起）：
+**schema 版本与向后兼容**（v0.3.0 起）：
 
-- `_SCHEMA_VERSION = 2`：新增 `satiety` / `energy` 两轴、金币、背包、吃饭账、纪念日、
-  首次相处日期、sleeping 快照位。
-- 旧分片（v1）**不需要迁移脚本**：`ShardState.from_payload` 对每个字段单独回退默认值，
-  缺 `satiety`/`energy` 时会补上 `Stats()` 的默认值，金币补 `start_sodas`。
-  这是刻意设计——真机上跑着 v0.1.0 的分片，升级后必须能直接读。
+- `_SCHEMA_VERSION = 3`：新增**反馈闭环台账**（当日已用的正/负修正预算、上次判断时刻、
+  当日判断次数、最近几条判断记录）。判断记录只存**标签与时间**，不存任何对话正文。
+- v2 新增：`satiety` / `energy` 两轴、金币、背包、吃饭账、纪念日、首次相处日期、sleeping 快照位。
+- 旧分片（v1 / v2）**不需要迁移脚本**：`ShardState.from_payload` 对每个字段单独回退默认值，
+  缺 `satiety`/`energy` 时会补上 `Stats()` 的默认值，金币补 `start_sodas`，
+  缺反馈台账时视为"今天还没用过修正额度"。
+  这是刻意设计——真机上跑着旧版的分片，升级后必须能直接读。
 - **不写入** `schema_version` 之外的"迁移标记"：一旦要写迁移逻辑，就在 `from_payload`
   里按 `_SCHEMA_VERSION` 分支，而不是让文件自己带状态机。
 """
@@ -32,6 +34,7 @@ from ..core.model import STAT_NAMES, Stats
 from ..core.rhythm import day_number_of
 
 __all__ = [
+    "JUDGMENT_HISTORY_MAX",
     "KEY_PREFIX",
     "MEAL_DAYS_KEEP",
     "SEEN_IDS_MAX",
@@ -46,8 +49,9 @@ KEY_PREFIX = "ourlife@"
 SEEN_IDS_MAX = 512
 INJECT_HISTORY_MAX = 20
 MEAL_DAYS_KEEP = 14
-_SCHEMA_VERSION = 2
-
+# 面板"最近几次她自己的判断"保留条数（只存标签 + 时间，不存任何正文）
+JUDGMENT_HISTORY_MAX = 12
+_SCHEMA_VERSION = 3
 
 def shard_key(lanlan: str) -> str:
     return f"{KEY_PREFIX}{lanlan}"
@@ -105,6 +109,17 @@ class ShardState:
     last_meal_at: float | None = None
     # 她最近一次是"睡着"状态（进食判据在睡眠期放宽到"醒来吃"）
     sleeping: bool = False
+    # --- 反馈闭环台账（v0.3.0，schema 3）---
+    # 当日已用掉的修正预算（单位是"心情分"，正负分开记）。跨天在
+    # `reset_judgment_day` 里归零；两个预算各自封顶，见 core/judgment.judge 的闸门 ③。
+    judgment_day: str = ""
+    judgment_used_add: float = 0.0
+    judgment_used_subtract: float = 0.0
+    judgment_count_today: int = 0
+    # 上次判断的时刻：闸门 ④ 的判据是 `last_touch_at > last_judgment_at`
+    last_judgment_at: float | None = None
+    # 最近几次判断（只存 {at, label, applied}，**不含任何对话正文**）
+    judgment_history: tuple[dict[str, Any], ...] = ()
     updated_at: float = 0.0
     # 上一拍的档位快照（用于跨拍判跨档；不持久化）
     tier_snapshot: dict[str, str] = field(default_factory=dict)
@@ -180,6 +195,44 @@ class ShardState:
         stamps = [stamp for stamp in (*self.respond_timestamps, at) if stamp > at - 7200.0]
         self.respond_timestamps = tuple(sorted(stamps))
 
+    # ------------------------------------------------------------------
+    # 反馈闭环台账（v0.3.0）
+    # ------------------------------------------------------------------
+
+    def reset_judgment_day(self, *, today: str) -> bool:
+        """跨天归零当日修正预算。返回"是否真的发生了跨天"。
+
+        幂等：`account_date` 那套日账只管经济，判断预算是**另一本账**
+        （工具可以在任意时刻被调用，不能等 tick 来重置），所以单独一个字段与方法。
+        两处调用：tick 结算里（跟日账一起，保证面板读到的数是对的）与工具入口里
+        （工具可能先于 tick 被调用——它必须自己保证算的是今天的账）。
+        """
+        if self.judgment_day == today:
+            return False
+        self.judgment_day = today
+        self.judgment_used_add = 0.0
+        self.judgment_used_subtract = 0.0
+        self.judgment_count_today = 0
+        return True
+
+    def note_judgment(self, *, at: float, label: str, applied: float) -> None:
+        """记一次判断。只存标签、时刻与"实际改了多少"，**不存任何对话正文**。"""
+        self.last_judgment_at = at
+        self.judgment_count_today += 1
+        if applied > 0.0:
+            self.judgment_used_add += applied
+        elif applied < 0.0:
+            self.judgment_used_subtract += -applied
+        entry: dict[str, Any] = {"at": at, "label": label, "applied": round(applied, 4)}
+        history = [*self.judgment_history, entry]
+        self.judgment_history = tuple(history[-JUDGMENT_HISTORY_MAX:])
+
+    def judgment_remaining(self, *, add_points: float, subtract_points: float) -> tuple[float, float]:
+        """当日剩余额度（面板读数用；两个值都不会为负）。"""
+        remaining_add = max(0.0, float(add_points) - self.judgment_used_add)
+        remaining_subtract = max(0.0, float(subtract_points) - self.judgment_used_subtract)
+        return remaining_add, remaining_subtract
+
     def last_injected_stats(self) -> Stats | None:
         for entry in reversed(self.inject_history):
             raw = entry.get("stats")
@@ -215,6 +268,14 @@ class ShardState:
             "last_meal_at": self.last_meal_at,
             "sleeping": self.sleeping,
             "inventory": self.inventory_counts(),
+            "judgment": {
+                "day": self.judgment_day,
+                "used_add": round(self.judgment_used_add, 3),
+                "used_subtract": round(self.judgment_used_subtract, 3),
+                "count_today": self.judgment_count_today,
+                "last_judgment_at": self.last_judgment_at,
+                "history": [dict(item) for item in self.judgment_history[-6:]],
+            },
             "updated_at": self.updated_at,
         }
 
@@ -253,6 +314,12 @@ class ShardState:
             "meals_total": self.meals_total,
             "last_meal_at": self.last_meal_at,
             "sleeping": self.sleeping,
+            "judgment_day": self.judgment_day,
+            "judgment_used_add": self.judgment_used_add,
+            "judgment_used_subtract": self.judgment_used_subtract,
+            "judgment_count_today": self.judgment_count_today,
+            "last_judgment_at": self.last_judgment_at,
+            "judgment_history": [dict(item) for item in self.judgment_history],
             "updated_at": self.updated_at,
         }
 
@@ -323,6 +390,14 @@ class ShardState:
             meals_total=max(0, _as_int(payload.get("meals_total"), 0)),
             last_meal_at=_as_optional_float(payload.get("last_meal_at")),
             sleeping=_as_bool(payload.get("sleeping")),
+            judgment_day=_as_str(payload.get("judgment_day")),
+            judgment_used_add=max(0.0, _as_float(payload.get("judgment_used_add"), 0.0)),
+            judgment_used_subtract=max(0.0, _as_float(payload.get("judgment_used_subtract"), 0.0)),
+            judgment_count_today=max(0, _as_int(payload.get("judgment_count_today"), 0)),
+            last_judgment_at=_as_optional_float(payload.get("last_judgment_at")),
+            judgment_history=tuple(
+                dict(item) for item in _as_list(payload.get("judgment_history")) if isinstance(item, Mapping)
+            )[-JUDGMENT_HISTORY_MAX:],
             updated_at=_as_float(payload.get("updated_at"), now),
         )
 

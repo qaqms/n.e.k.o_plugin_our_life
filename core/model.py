@@ -67,6 +67,7 @@ __all__ = [
     "apply_day_greet",
     "apply_decay",
     "apply_item",
+    "apply_judgment",
     "apply_meal",
     "apply_neglect",
     "apply_streak_bonus",
@@ -563,6 +564,29 @@ def apply_turn_gain(stats: Stats, *, session_index: int, growth: GrowthSettings)
         satiety=clamp_value(stats.satiety),
         energy=clamp_value(stats.energy),
     )
+
+
+def apply_judgment(stats: Stats, deltas: Mapping[str, float] | None) -> Stats:
+    """把一次反馈判断的修正量加到数值上（未知轴忽略、逐轴夹取到 0..100）。
+
+    与 `apply_turn_gain` / `apply_day_greet` 并列，但**语义完全不同**：
+
+    - 上面两个是"互动本身就有的成长"，按发言条数给，是**基线**；
+    - 这个是"她自己判断这轮怎么样"的**修正项**，有上限、需要真实互动作前提。
+
+    所以它**不替代** `apply_turn_gain`——两者叠加，判断只是把"连发短句也能拿满步长"
+    这个失真往回拉一点（`core/judgment.py` 的四条闸门保证拉不回来多少）。
+
+    入参是已经算好的增量（不由本函数决定幅度）：幅度归 `core/judgment.judge`，
+    本函数只负责"加法 + 夹取"，保持 model 层"纯算术、无策略"的职责边界。
+    """
+    if not deltas:
+        return stats
+    data = stats.as_dict()
+    for name, delta in deltas.items():
+        if name in data:
+            data[name] = clamp_value(float(data[name]) + float(delta))
+    return Stats(**data)
 
 
 def apply_day_greet(stats: Stats, growth: GrowthSettings) -> Stats:

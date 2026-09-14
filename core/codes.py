@@ -49,6 +49,12 @@ PANEL_ERROR_CODES: frozenset[str] = frozenset(
         "company_cooldown",  # 冷却中，还没到可以撒娇的时机
         # 她在睡觉：非危机的"索取陪伴"会被挡下（不是错误，是作息）
         "sleeping",  # 她已经睡了，等她醒了再说
+        # 反馈闭环（v0.3.0）：她自己的判断回流被四道闸门挡下的情形。
+        # 这三个码**刻意不进工具返回值**给模型（那会把噪声引回对话），
+        # 而是留给面板/诊断面——工具返回的是 `reason=judgment_*` 那种内部原因码。
+        "invalid_judgment",  # 标签不在白名单里（已被收敛成 neutral，不修正）
+        "judgment_capped",  # 当日修正预算用尽
+        "judgment_throttled",  # 会话内递减到不足以修正
     }
 )
 

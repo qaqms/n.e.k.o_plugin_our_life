@@ -41,12 +41,14 @@ from ..core.injection import (
     TRIGGER_DAILY_GREET,
     TRIGGER_HUNGRY,
     TRIGGER_INTERVAL,
+    TRIGGER_JUDGMENT,
     TRIGGER_TIER_CHANGE,
     TRIGGER_TIRED,
     build_text,
     resolve_ai_behavior,
 )
-from ..core.model import crisis_axes
+from ..core.judgment import JUDGMENT_WEIGHTS
+from ..core.model import STAT_NAMES, crisis_axes
 from ..core.rhythm import Anniversary, DailyRhythm
 from .state import ShardState
 
@@ -91,6 +93,7 @@ class Injector:
         rhythm: "DailyRhythm | None" = None,
         anniversary: "Anniversary | None" = None,
         anniversary_seen: bool = False,
+        judgment_label: str = "",
     ) -> InjectionPlan | None:
         """按优先级挑一个注入理由；没有理由就返回 None（绝大多数 tick 都是 None）。"""
         if not settings.enabled:
@@ -120,6 +123,11 @@ class Injector:
             trigger = TRIGGER_TIER_CHANGE
         elif is_new_day and had_new_interaction:
             trigger = TRIGGER_DAILY_GREET
+        elif JUDGMENT_WEIGHTS.get(judgment_label, 0.0) != 0.0:
+            # 反馈闭环：她**真的**给出了带方向的判断时，才让这个感受进上下文。
+            # `neutral`（含一切被收敛掉的非法标签）权重为 0 —— 那种情况什么都不说，
+            # 免得"她回味了一下但没什么感觉"变成一句空话挤占 prompt。
+            trigger = TRIGGER_JUDGMENT
 
         if trigger is None:
             if within_interval or not had_new_interaction:
@@ -147,6 +155,7 @@ class Injector:
             rhythm=rhythm,
             anniversary=anniversary,
             day_number=state.day_number,
+            judgment_label=judgment_label if trigger == TRIGGER_JUDGMENT else "",
         )
         return InjectionPlan(text=text, trigger=trigger, ai_behavior=behavior, lanlan=state.lanlan)
 
@@ -258,11 +267,14 @@ def _drifted_since_last_injection(state: ShardState) -> bool:
 
     比较对象刻意是**上次注入时**的快照，而不是上一拍的快照：否则每次衰减一丁点就累积成
     "变化很大"，会把 min_interval 频控架空。
+
+    比较**全部五轴**：v0.1.0 只比好感/心情/健康，v0.2.0 加了饱食与精力却漏在这里——
+    结果"她饿到掉档但心情没动"这种最该说话的情形反而不触发漂移注入。
     """
     before = state.last_injected_stats()
     if before is None:
         return False
     deltas = tuple(
-        abs(getattr(state.stats, name) - getattr(before, name)) for name in ("affection", "mood", "health")
+        abs(getattr(state.stats, name) - getattr(before, name)) for name in STAT_NAMES
     )
     return max(deltas) >= DRIFT_THRESHOLD

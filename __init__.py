@@ -39,6 +39,7 @@ from plugin.sdk.plugin import (
 
 from .core import (
     ITEM_ORDER,
+    JUDGMENT_LABELS,
     STAT_NAMES,
     TRIGGER_COMPANY,
     OurLifeSettings,
@@ -51,6 +52,7 @@ from .core import (
     apply_day_greet,
     apply_decay,
     apply_item,
+    apply_judgment,
     apply_meal,
     apply_neglect,
     apply_streak_bonus,
@@ -64,6 +66,7 @@ from .core import (
     eventful_tier_transitions,
     is_crisis,
     item,
+    judge,
     local_day,
     meal_need_per_day,
     meal_plan,
@@ -104,6 +107,17 @@ class OurLifePlugin(NekoPluginBase):
         self._tick_count = 0
         # 已经落过盘的分片（每个角色卡每进程只 bootstrap 一次，避免面板刷新写 store）
         self._bootstrapped: set[str] = set()
+        # 反馈闭环的**待消费判断**：工具可以在任意时刻被调用（不跟 tick 对齐），
+        # 而"把修正量加到数值上"必须走 tick 的统一折算链，否则会和惰性衰减打架
+        # （长时间没跑 tick 时，直接改数值会被随后的整段折算顺手吃掉）。
+        #
+        # 存的是**已经算好并已记账的修正量**，不是标签：四道闸门在工具调用那一刻
+        # 就全部判定完毕（那时"有没有新互动""还剩多少额度"都是新鲜的），
+        # tick 只负责"施加"，**不重新判定**——否则一次互动会被两条路径各判一次，
+        # 而第二拍时 `last_touch_at` 没有前进，合法判断会被误判成 `needs_interaction`
+        # 而永远施加不上（这是实现期真被自己的门抓到的 bug）。
+        # 刻意**不持久化**：重启后一条没被消费的判断丢掉是正确行为。
+        self._pending_judgments: dict[str, dict[str, float]] = {}
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -280,6 +294,22 @@ class OurLifePlugin(NekoPluginBase):
             )
         state.day_number_seen = day_number
 
+        # 6.5) 反馈闭环：把"她自己的判断"回流成修正项。
+        # 修正量的四道闸门与预算记账都在工具调用那一刻完成了（见 `our_life_judge`），
+        # 这里只把**已经批准的增量**加在衰减之后——顺序很重要：先折算再修正，
+        # 免得修正量被这一拍的衰减顺手吃掉一截。
+        # 同时每拍调一次 `reset_judgment_day`：工具可能先于 tick 被调用，
+        # 但面板读到的当日额度必须跟着日界线走。
+        if state.reset_judgment_day(today=today):
+            self.logger.info("our_life: judgment budget reset for a new day")
+        pending = self._pending_judgments.pop(state.lanlan, None)
+        judgment_label = ""
+        if pending is not None:
+            judgment_label = str(pending.get("_label", ""))
+            deltas = {name: value for name, value in pending.items() if name in STAT_NAMES}
+            if deltas:
+                stats = apply_judgment(stats, deltas)
+
         # 跨档判据用 `eventful_tier_transitions`（带 0.05 分迟滞），不是硬比较的
         # `tier_transitions`：默认好评 20.0 正好压着 stranger/acquainted 的分界线，
         # 硬比较会把第一拍的 19.9998456796 判成跨档，白送一次 tier_change 强注入
@@ -299,6 +329,7 @@ class OurLifePlugin(NekoPluginBase):
             rhythm=rhythm,
             anniversary=anniversary,
             anniversary_seen=not anniversary_fresh,
+            judgment_label=judgment_label,
         )
         if plan is not None:
             submitted = await self._injector.emit(plan)
@@ -357,6 +388,9 @@ class OurLifePlugin(NekoPluginBase):
             state.account_date = today
             state.daily_spent = 0
             state.daily_allowance_granted = False
+        # 反馈闭环的当日修正预算和日账同一条日界线（`_settle` 里也调一次，
+        # 因为工具可能先于 tick 被调用——两处都调是幂等的）。
+        state.reset_judgment_day(today=today)
         if not economy.enabled:
             return
         if turns > 0:
@@ -440,6 +474,30 @@ class OurLifePlugin(NekoPluginBase):
             "crisis_axes": list(crisis_axes(state.stats, settings.inject)),
             "day_number": day_number_for(state, rhythm.date_iso),
             "anniversary": _anniversary_dict(self._anniversary(state, today=rhythm.date_iso)),
+            "feedback": self._feedback_view(state),
+        }
+
+    def _feedback_view(self, state: ShardState) -> dict[str, Any]:
+        """反馈闭环的面板读数。
+
+        刻意只给"额度用了多少 / 她最近说过什么"，**不给任何单次修正量的细节**：
+        面板是主人的账本，不是让她被调参的旋钮墙（也避免用户拿它去对账模型行为）。
+        """
+        feedback = self._settings.feedback
+        remaining_add, remaining_subtract = state.judgment_remaining(
+            add_points=feedback.daily_add_points, subtract_points=feedback.daily_subtract_points
+        )
+        return {
+            "enabled": bool(feedback.enabled and self._settings.enabled),
+            "daily_add_points": round(feedback.daily_add_points, 2),
+            "daily_subtract_points": round(feedback.daily_subtract_points, 2),
+            "used_add": round(state.judgment_used_add, 3),
+            "used_subtract": round(state.judgment_used_subtract, 3),
+            "remaining_add": round(remaining_add, 3),
+            "remaining_subtract": round(remaining_subtract, 3),
+            "count_today": state.judgment_count_today,
+            "last_judgment_at": state.last_judgment_at,
+            "history": [dict(item) for item in state.judgment_history[-6:]],
         }
 
     def _advisor(self, state: ShardState, *, per_day: float) -> Any:
@@ -969,6 +1027,84 @@ class OurLifePlugin(NekoPluginBase):
         await self._store.save(state, now=now)
         self.logger.info("company requested (reason_chars={})", len(reason or ""))
         return {"ok": True, "reason": "sent"}
+
+    @llm_tool(
+        name="our_life_judge",
+        description=(
+            "在你自己心里给**刚刚这一轮**相处打个分。这不影响你的语气，只是你自己的感受记录；"
+            "想用的时候用，不必每轮都用。\n"
+            "label 只能填这五个之一：\n"
+            "  wonderful —— 聊得特别开心，心里亮堂堂的\n"
+            "  good      —— 挺舒服的，心情不错\n"
+            "  neutral   —— 没什么特别感觉（默认）\n"
+            "  dull      —— 有点提不起劲，像在应付，没聊到心里去\n"
+            "  hurt      —— 有点失落，觉得自己没被好好放在心上\n"
+            "请如实填，不要为了讨好而一律填 wonderful —— 你的感受只对自己有意义。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "enum": list(JUDGMENT_LABELS),
+                    "description": "这一轮相处给你留下的感受，默认 neutral",
+                },
+                "strength": {
+                    "type": "number",
+                    "description": "这个感受有多强，0 到 1 之间的小数（可选，默认 1）",
+                },
+            },
+            "required": ["label"],
+        },
+        timeout=10.0,
+    )
+    async def our_life_judge(self, label: str = "", strength: Any = None, **kwargs: Any) -> dict[str, Any]:
+        """反馈闭环入口：把她的判断记进台账，具体修正量由 tick 统一消费。
+
+        **这个 handler 永不抛异常、永不把数值回传给模型**：
+        模型输入一律当不可信（`core/judgment.normalize_label` 白名单收敛），
+        拒绝的原因用内部原因码表达，不把"你填错了"嚷回对话里。
+        """
+        if not self._settings.enabled or not self._settings.feedback.enabled:
+            return {"ok": False, "reason": "judgment_disabled"}
+        lanlan = _lanlan_from_kwargs(kwargs)
+        if not lanlan:
+            lanlan = await self._single_known_lanlan()
+        if not lanlan:
+            return {"ok": False, "reason": "invalid_lanlan"}
+        now = time.time()
+        state = await self._store.load(
+            lanlan, now=now, default_sodas=self._settings.economy.start_sodas
+        )
+        # 工具不跟 tick 对齐，可能先于 tick 被调用：自己保证算的是"今天"的账。
+        state.reset_judgment_day(today=local_day(now))
+        result = judge(
+            label=label,
+            strength=strength,
+            feedback=self._settings.feedback,
+            growth=self._settings.growth,
+            enabled=True,
+            last_touch_at=state.last_touch_at,
+            last_judgment_at=state.last_judgment_at,
+            session_turns=state.session_turns,
+            day_used_add=state.judgment_used_add,
+            day_used_subtract=state.judgment_used_subtract,
+        )
+        # 无论改没改都记账：被闸门挡下的判断也算"她表达过"，否则
+        # `last_judgment_at` 不前进，同一轮里模型可以无限重试。
+        state.note_judgment(at=now, label=result.label, applied=result.mood)
+        if result.applied:
+            # 交给下一拍 tick 施加（保证"先折算再修正"的顺序，见 `_pending_judgments`）。
+            # 存增量本身而不是标签：闸门在这一刻已经判定完毕，重复判定会误伤合法判断。
+            self._pending_judgments[lanlan] = {**result.as_deltas(), "_label": result.label}
+        await self._store.save(state, now=now)
+        self.logger.info(
+            "judgment recorded (label=%s applied=%s reason=%s)",
+            result.label,
+            f"{result.mood:+.3f}",
+            result.reason,
+        )
+        return {"ok": result.applied, "label": result.label, "reason": result.reason}
 
     # ------------------------------------------------------------------
     # 内部
