@@ -20,6 +20,7 @@ from .coerce import as_bool, as_float, as_float_list, as_int, as_int_list, as_st
 __all__ = [
     "DecaySettings",
     "EconomySettings",
+    "EventSettings",
     "FeedbackSettings",
     "GrowthSettings",
     "InjectSettings",
@@ -245,6 +246,46 @@ class FeedbackSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class EventSettings:
+    """阶段性事件（v0.4.0「阶段性事件与面板叙事」）。
+
+    这里**只有开关与冷却**，没有阈值：两条"好起来了"的线（病愈 40、哄好 20）
+    直接引用 `core/model.TIER_BOUNDS`，固定在 `core/events.py` 里作为单一来源。
+    理由与"分档阈值不进配置"完全一样（见 `core/model.py` 与 DESIGN.md）——
+    面板显示的档位与实际触发的事件必须是同一个判据，把它变成旋钮就等于允许
+    用户把"什么算病好了"调得和面板显示的不一致。
+
+    两个冷却是**时长**而不是"每天几次"：时长语义更直白（"六小时内不重复说同一件事"），
+    而且不需要跨天重置的额外状态——台账本身就有界、直接在窗口里查即可。
+    """
+
+    enabled: bool = True
+    # 心情是小时级（τ=3h），掉下去又上来是常态；6 小时压住反复，又允许一天里最多 4 次
+    mood_recovery_min_interval_hours: float = 6.0
+    # 比一天略短：允许"隔天又病了、又好了"这种真的两次经历，压住同一天里的抖动
+    health_recovery_min_interval_hours: float = 20.0
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None) -> "EventSettings":
+        base = cls()
+        return cls(
+            enabled=as_bool(raw.get("enabled") if raw else None, base.enabled),
+            mood_recovery_min_interval_hours=_non_negative(
+                as_float(
+                    raw.get("mood_recovery_min_interval_hours") if raw else None,
+                    base.mood_recovery_min_interval_hours,
+                )
+            ),
+            health_recovery_min_interval_hours=_non_negative(
+                as_float(
+                    raw.get("health_recovery_min_interval_hours") if raw else None,
+                    base.health_recovery_min_interval_hours,
+                )
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class NeglectSettings:
     """冷落惩罚（拟真、按天、有上限）。"""
 
@@ -347,6 +388,7 @@ class OurLifeSettings:
     economy: EconomySettings = field(default_factory=EconomySettings)
     growth: GrowthSettings = field(default_factory=GrowthSettings)
     feedback: FeedbackSettings = field(default_factory=FeedbackSettings)
+    events: EventSettings = field(default_factory=EventSettings)
     neglect: NeglectSettings = field(default_factory=NeglectSettings)
     inject: InjectSettings = field(default_factory=InjectSettings)
 
@@ -363,6 +405,7 @@ class OurLifeSettings:
             economy=EconomySettings.from_mapping(section(config, "our_life", "economy")),
             growth=GrowthSettings.from_mapping(section(config, "our_life", "growth")),
             feedback=FeedbackSettings.from_mapping(section(config, "our_life", "feedback")),
+            events=EventSettings.from_mapping(section(config, "our_life", "events")),
             neglect=NeglectSettings.from_mapping(section(config, "our_life", "neglect")),
             inject=InjectSettings.from_mapping(section(config, "our_life", "inject")),
         )

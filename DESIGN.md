@@ -6,7 +6,9 @@
 ## Identity Lock
 
 - plugin_id: `our_life`
-- folder: `D:\neko kaifa\n.e.k.o_plugin_our_life`
+- folder: `F:\ai\neko kaifa2\n.e.k.o_plugin_our_life`（开发工作区，仓库名 `n.e.k.o_plugin_our_life`）
+- 挂载态目录名: `our_life` —— 宿主按 entry 的包名匹配目录名，**必须是合法标识符**，
+  所以开发工作区目录名不能直接挂载（见「已知陷阱」§11）
 - name: `我们的生活`
 - entry: `plugin.plugins.our_life:OurLifePlugin`
 - main class: `OurLifePlugin`
@@ -138,6 +140,25 @@ v0.1.0（首版）：
 6. fail-closed 总开关 `[our_life].enabled = false`（默认关：未打开前不注入、不结算、不推送）
 7. 中英 i18n、`tests/` 数值门 + i18n 契约门、`tools/release_gate.py` 五门
 
+## v0.4.0 Scope（「阶段性事件与面板叙事」主线，第八轮）
+
+1. `core/events.py`（新）：两个事件（`sick_recovery` / `cheered_up`）、判定顺序、
+   冷却窗口、台账读取助手。**全是纯函数**——不读时钟、不接 `ShardState`、不产生文案。
+2. **判据线引用档位表**：病愈 = 健康跨过 `TIER_BOUNDS[2]`（40，脱离 sick+frail 两档，
+   因为那两档面板都读作"病着"）；哄好 = 心情跨过 `TIER_BOUNDS[1]`（20，脱离 sulking）。
+   import 时自检，改档位表就会炸而不是悄悄错位。
+3. `services/injector.plan_for_event`（新通道）：与 `plan_for_tick` **并列**而不是插进它的链，
+   避免事件与危机互相挤掉；同轴抑制；睡眠抑制按 `wake_ok` 分。
+4. `core/injection`：新增 `TRIGGER_STAGED_EVENT` 与 `EVENT_NARRATION_ZH`（第一人称叙事模板，
+   按既有注入契约：不给数字、不给档名、带 `{MASTER_NAME}` / `{LANLAN_NAME}`）。
+5. tick 接线（`__init__.py` 步骤 6.6）：**先无条件记账，再决定发不发**——
+   睡过去的事件也要留在经历里，而"记账必须无条件"正是冷却判定的前提。
+6. 面板「她经历过什么」块（时刻 / 事件 / 轴）+ 说明文案。
+7. schema 3 → 4：新增有界 `event_history`（12 条，只存事件名/轴/时刻/数值快照）。
+
+刻意不做（见 CHANGELOG 与下节）：**生日**（需要新配置面与用户真实输入，单独立轮）、
+**事件给数值奖励**（会让"康复"变成刷数值路径）、**为事件开第三条频控**（复用总闸门）。
+
 ## v0.3.0 Scope（「反馈闭环」主线）
 
 1. `core/judgment.py`（新）：五个标签的白名单枚举、输入收敛（非法 → `neutral`）、
@@ -210,7 +231,9 @@ v0.1.0（首版）：
 
 ## Write Workspace
 
-`D:\neko kaifa\n.e.k.o_plugin_our_life\`（独立 Git 仓库；不触碰 N.E.K.O 源码树）
+`F:\ai\neko kaifa2\n.e.k.o_plugin_our_life\`（独立 Git 仓库；不触碰 N.E.K.O 源码树）。
+宿主仓在同级的 `F:\ai\neko kaifa2\N.E.K.O\` —— `tools/release_gate.py` 的默认宿主探测
+（`PLUGIN_ROOT.parent / "N.E.K.O"`）正好命中这个布局，无需 `--host-root`。
 
 ## 已知陷阱（实现时必须绕开，均源码核实）
 
@@ -231,6 +254,18 @@ v0.1.0（首版）：
 9. **隐私**：注入正文含用户互动信息，只进总线不进日志正文；涉及原文一律不上 `logger`。
 10. **`@llm_tool` 名称**必须匹配 `^[A-Za-z0-9_.\-]{1,64}$`，且工具注册表在 `main_server` 内存里，
     宿主重启即丢、无自动重注册——首版不额外做重注册心跳（记为待办），并在 README 说明。
+11. **挂载态目录名必须等于 entry 的包名**（宿主源码核实，`plugin/core/entry_points.py`
+    的 `describe_plugin_entry_directory_mismatch` + `plugin/core/host.py:467` 的
+    `config_path.resolve().parent.name`）：`plugin.plugins.our_life` 只能配真实名叫 `our_life`
+    的目录，否则 400 `PLUGIN_ENTRY_DIRECTORY_MISMATCH` 且插件停在 failed。
+    **软链接 / junction 也救不回来**（`resolve()` 会把链接解开、目录名变回真实名）。
+    所以开发工作区叫 `n.e.k.o_plugin_our_life`（合法 Git 仓名，不是合法 Python 包名），
+    要挂进宿主只能**复制**：`tools/release_gate.py` 的 release / hosted-tsx 两门就是
+    真复制进 `<宿主>/plugin/plugins/our_life/`（探针副本，用后即删）。
+12. **Hosted TSX 检查要求被检路径在宿主仓内**（`frontend/plugin-manager/scripts/check-hosted-tsx.mjs`
+    的 `assertPathInsideRepo` 用 `realpathSync` 比对），所以它**只能**对宿主仓内的副本跑，
+    对仓外工作区路径会直接报 "Plugin search target outside repo root"。
+    这也是 release_gate 必须复制副本的原因之一。
 
 ## Risk Follow-ups
 
@@ -246,9 +281,14 @@ v0.1.0（首版）：
 
 ## 路线图（后续轮次）
 
-- **阶段性事件与面板叙事（下一轮）**：病愈 / 哄好 / 生日等一次性事件 + 叙事文本。
-  v0.3.0 已经把"她自己的感受"作为读数接进面板与注入层，叙事可以直接在它旁边长出来。
+- **阶段性事件（已完成，v0.4.0 第八轮）**：病愈 / 哄好两个事件 + 面板「她经历过什么」。
+  下一轮可以在此之上加**叙事深度**：把同一件事在不同处境下的说法区分开
+  （比如"病愈时主人就在旁边"与"病愈时他刚回来"该是两种语气），或加"她记得自己病过多久"。
+- **生日**：需要"角色的生日"这个新配置面与用户的真实输入，与下面的情绪感知一样属于
+  **需要单独设计的一轮**——v0.4.0 刻意没把它塞进事件层（那会让"事件"混进两种时间语义：
+  档位跨越 vs 日历日期）。
 - 其余 6 语言（zh-TW / ja / ko / ru / es / pt）补齐，并加"键集一致门"
+  （注意：**键集一致门已有**，见 `tests/test_i18n_contract.py`；缺的是那 6 份译文本身）。
 - 情绪感知：以**独立插件联动**方式接入（用户明确要求后做），届时按跨插件契约单列设计。
   注意它与 v0.3.0 的反馈闭环**不是同一件事**：后者是**她自己**回传感受，
   前者是插件去读对话正文推情绪（会碰隐私边界，故单独立项）。

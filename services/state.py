@@ -9,14 +9,17 @@
   重新算成"新互动"，凭空刷一波数值。
 - 该存的东西一律 JSON 安全（dict/list/str/num/bool/None），因为 store 会直接序列化。
 
-**schema 版本与向后兼容**（v0.3.0 起）：
+**schema 版本与向后兼容**（v0.4.0 起）：
 
+- `_SCHEMA_VERSION = 4`：新增**阶段性事件台账**（`event_history`：最近若干条
+  `{key, stat, value, width, at}`）。与判断台账同一条隐私纪律——只存事件名与数值快照，
+  不存任何对话正文。
 - `_SCHEMA_VERSION = 3`：新增**反馈闭环台账**（当日已用的正/负修正预算、上次判断时刻、
   当日判断次数、最近几条判断记录）。判断记录只存**标签与时间**，不存任何对话正文。
 - v2 新增：`satiety` / `energy` 两轴、金币、背包、吃饭账、纪念日、首次相处日期、sleeping 快照位。
-- 旧分片（v1 / v2）**不需要迁移脚本**：`ShardState.from_payload` 对每个字段单独回退默认值，
+- 旧分片（v1 / v2 / v3）**不需要迁移脚本**：`ShardState.from_payload` 对每个字段单独回退默认值，
   缺 `satiety`/`energy` 时会补上 `Stats()` 的默认值，金币补 `start_sodas`，
-  缺反馈台账时视为"今天还没用过修正额度"。
+  缺反馈台账时视为"今天还没用过修正额度"，缺事件台账时视为"她还没经历过什么"。
   这是刻意设计——真机上跑着旧版的分片，升级后必须能直接读。
 - **不写入** `schema_version` 之外的"迁移标记"：一旦要写迁移逻辑，就在 `from_payload`
   里按 `_SCHEMA_VERSION` 分支，而不是让文件自己带状态机。
@@ -34,6 +37,7 @@ from ..core.model import STAT_NAMES, Stats
 from ..core.rhythm import day_number_of
 
 __all__ = [
+    "EVENT_HISTORY_MAX",
     "JUDGMENT_HISTORY_MAX",
     "KEY_PREFIX",
     "MEAL_DAYS_KEEP",
@@ -51,7 +55,11 @@ INJECT_HISTORY_MAX = 20
 MEAL_DAYS_KEEP = 14
 # 面板"最近几次她自己的判断"保留条数（只存标签 + 时间，不存任何正文）
 JUDGMENT_HISTORY_MAX = 12
-_SCHEMA_VERSION = 3
+# 面板"她最近经历过什么"保留条数（只存事件名 + 时刻 + 数值快照，不存任何正文）。
+# 十二条同时是冷却窗口的"记忆长度"：默认最紧的冷却是 6h，一天最多 4 条，
+# 所以 12 条永远覆盖得下一整天的冷却判定（见 core/events.pick_event 的说明）。
+EVENT_HISTORY_MAX = 12
+_SCHEMA_VERSION = 4
 
 def shard_key(lanlan: str) -> str:
     return f"{KEY_PREFIX}{lanlan}"
@@ -120,6 +128,10 @@ class ShardState:
     last_judgment_at: float | None = None
     # 最近几次判断（只存 {at, label, applied}，**不含任何对话正文**）
     judgment_history: tuple[dict[str, Any], ...] = ()
+    # --- 阶段性事件台账（v0.4.0，schema 4）---
+    # 她最近经历过什么（只存 {key, stat, value, width, at}，**不含任何正文**）。
+    # 它同时承担两件事：面板的"经历"列表，与 `core/events.pick_event` 的冷却判据。
+    event_history: tuple[dict[str, Any], ...] = ()
     updated_at: float = 0.0
     # 上一拍的档位快照（用于跨拍判跨档；不持久化）
     tier_snapshot: dict[str, str] = field(default_factory=dict)
@@ -233,6 +245,37 @@ class ShardState:
         remaining_subtract = max(0.0, float(subtract_points) - self.judgment_used_subtract)
         return remaining_add, remaining_subtract
 
+    # ------------------------------------------------------------------
+    # 阶段性事件台账（v0.4.0）
+    # ------------------------------------------------------------------
+
+    def note_event(self, entry: Mapping[str, Any]) -> None:
+        """记一次阶段性事件（由 `core/events.StagedEvent.as_dict()` 产出）。
+
+        只吸收已知形状的键，其余一律丢弃：台账是**持久化**的，
+        让未经校验的字典进来等于给"往 store 里塞任意内容"开了口子。
+        """
+        key = entry.get("key")
+        stat = entry.get("stat")
+        at = entry.get("at")
+        if not isinstance(key, str) or not key or not isinstance(stat, str) or not stat:
+            return
+        if not isinstance(at, (int, float)):
+            return
+        record: dict[str, Any] = {"key": key, "stat": stat, "at": float(at)}
+        for name in ("value", "width"):
+            raw = entry.get(name)
+            if isinstance(raw, (int, float)):
+                record[name] = round(float(raw), 2)
+        history = [*self.event_history, record]
+        self.event_history = tuple(history[-EVENT_HISTORY_MAX:])
+
+    def recent_events(self, *, limit: int = 6) -> tuple[dict[str, Any], ...]:
+        """最近几条经历（**新的在前**，面板直接用；不返回内部元组本身）。"""
+        if limit <= 0:
+            return ()
+        return tuple(dict(item) for item in self.event_history[-limit:][::-1])
+
     def last_injected_stats(self) -> Stats | None:
         for entry in reversed(self.inject_history):
             raw = entry.get("stats")
@@ -275,6 +318,10 @@ class ShardState:
                 "count_today": self.judgment_count_today,
                 "last_judgment_at": self.last_judgment_at,
                 "history": [dict(item) for item in self.judgment_history[-6:]],
+            },
+            "events": {
+                "history": [dict(item) for item in self.recent_events(limit=6)],
+                "total": len(self.event_history),
             },
             "updated_at": self.updated_at,
         }
@@ -320,6 +367,7 @@ class ShardState:
             "judgment_count_today": self.judgment_count_today,
             "last_judgment_at": self.last_judgment_at,
             "judgment_history": [dict(item) for item in self.judgment_history],
+            "event_history": [dict(item) for item in self.event_history],
             "updated_at": self.updated_at,
         }
 
@@ -398,6 +446,9 @@ class ShardState:
             judgment_history=tuple(
                 dict(item) for item in _as_list(payload.get("judgment_history")) if isinstance(item, Mapping)
             )[-JUDGMENT_HISTORY_MAX:],
+            event_history=tuple(
+                dict(item) for item in _as_list(payload.get("event_history")) if isinstance(item, Mapping)
+            )[-EVENT_HISTORY_MAX:],
             updated_at=_as_float(payload.get("updated_at"), now),
         )
 

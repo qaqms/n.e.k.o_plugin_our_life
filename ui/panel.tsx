@@ -126,6 +126,19 @@ type ShopEntry = {
   effects?: [string, number][]
 }
 
+/**
+ * 她经历过什么（v0.4.0 阶段性事件）。
+ * 只带事件名 / 轴 / 时刻与数值快照——台账里本来就没有任何对话正文（见 core/events.py）。
+ */
+type EventRecord = {
+  key?: string
+  stat?: string
+  value?: number
+  width?: number
+  at?: number
+  [key: string]: unknown
+}
+
 type State = {
   enabled?: boolean
   lanlan?: string
@@ -136,6 +149,7 @@ type State = {
   state?: ShardSnapshot | null
   runtime?: RuntimeView
   recent_injections?: InjectionRecord[]
+  recent_events?: EventRecord[]
   trend?: InjectionRecord[]
   hours?: number[]
   meal_days?: [string, number][]
@@ -211,6 +225,7 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   const advisor = runtime.advisor ?? {}
   const feedback: FeedbackView = runtime.feedback ?? {}
   const judgmentHistory = feedback.history ?? []
+  const eventHistory = state?.recent_events ?? []
   const enabled = state?.enabled === true
   const config = state?.config ?? {}
   const tiers = snapshot?.tiers ?? {}
@@ -619,6 +634,40 @@ export default function Panel(props: PluginSurfaceProps<State>) {
                   </Button>
                 </Inline>
               </Stack>
+            </Card>
+
+            <Card title={t("panel.section.events")}>
+              {eventHistory.length > 0 ? (
+                <Stack gap={12}>
+                  <DataTable
+                    rowKey="at"
+                    data={eventHistory}
+                    emptyText={t("panel.noEvents")}
+                    columns={[
+                      {
+                        key: "at",
+                        label: t("panel.field.time"),
+                        render: (row: EventRecord) => formatTime(row.at, "-"),
+                      },
+                      {
+                        key: "key",
+                        label: t("panel.field.event"),
+                        render: (row: EventRecord) =>
+                          t(`panel.event.${row.key ?? "unknown"}`, { defaultValue: row.key ?? "-" }),
+                      },
+                      {
+                        key: "stat",
+                        label: t("panel.field.stat"),
+                        render: (row: EventRecord) =>
+                          t(`panel.stat.${row.stat ?? "unknown"}`, { defaultValue: row.stat ?? "-" }),
+                      },
+                    ]}
+                  />
+                  <Text>{t("panel.eventsHint")}</Text>
+                </Stack>
+              ) : (
+                <EmptyState title={t("panel.noEvents")} description={t("panel.noEventsHint")} />
+              )}
             </Card>
 
             <Card title={t("panel.section.history")}>

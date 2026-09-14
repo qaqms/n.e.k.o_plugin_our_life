@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 from our_life.core.codes import PANEL_ERROR_CODES, camel_case, is_panel_code
+from our_life.core.events import EVENT_KEYS
 from our_life.core.injection import (
     TRIGGER_ANNIVERSARY,
     TRIGGER_COMPANY,
@@ -25,6 +26,7 @@ from our_life.core.injection import (
     TRIGGER_HUNGRY,
     TRIGGER_INTERVAL,
     TRIGGER_JUDGMENT,
+    TRIGGER_STAGED_EVENT,
     TRIGGER_TIER_CHANGE,
     TRIGGER_TIRED,
 )
@@ -191,9 +193,26 @@ def test_trigger_keys_exist_for_every_trigger() -> None:
         TRIGGER_TIRED,
         TRIGGER_ANNIVERSARY,
         TRIGGER_JUDGMENT,
+        TRIGGER_STAGED_EVENT,
     )
     for locale in LOCALES:
         messages = _load(locale)
         for trigger in triggers:
             key = f"panel.trigger.{trigger}"
             assert key in messages, f"{locale} is missing {key}"
+
+
+def test_event_keys_exist_for_every_staged_event() -> None:
+    """阶段性事件的名字必须两语齐全（v0.4.0）。
+
+    与 tier / trigger 两个族同一个理由：面板按 `panel.event.<key>` **动态拼键**
+    渲染"她经历过什么"，而拼接键不在引用面门（`t("字面量")` 正则）的覆盖面内——
+    少一个键不会让任何门变红，只会在面板上显示成空白。所以在这里逐项钉住。
+    """
+    assert EVENT_KEYS, "there must be at least one staged event"
+    for locale in LOCALES:
+        messages = _load(locale)
+        for event in EVENT_KEYS:
+            key = f"panel.event.{event}"
+            assert key in messages, f"{locale} is missing {key}"
+            assert messages[key].strip(), f"{locale}:{key} is empty"

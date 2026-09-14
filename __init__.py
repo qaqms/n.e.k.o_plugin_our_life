@@ -74,6 +74,7 @@ from .core import (
     minutes_until_next_boundary,
     neglect_entitlement_days,
     overlap_hours,
+    pick_event,
     recharge_plan,
     resolve_rhythm,
     satiety_per_day,
@@ -318,6 +319,45 @@ class OurLifePlugin(NekoPluginBase):
         state.stats = stats
         state.last_decay_at = now
         state.apply_summary(summary)
+
+        # 6.6) 阶段性事件（v0.4.0）：把她身上"真的发生过"的事挑出来，记一次账。
+        #
+        # 为什么在 tier_change 之后、注入判定之前：
+        # `plan_for_tick` 要看到本拍最终的 `state.stats`，而事件的判定需要**本拍的 before/after**
+        # ——两者都只在这一刻同时可得。放到注入判定之后会让事件晚一拍才被记账，
+        # 而晚一拍就意味着"她已经好了"与"她在说什么"错开一帧。
+        #
+        # 顺序纪律（很容易写反，见 core/events 模块 docstring 第 4 条）：
+        #   1. **先记账**（无条件）——"要不要记"与"要不要说"是两个问题，
+        #      混在一起会让睡过去的事件在下一拍被重新识别一遍（冷却靠的正是这本台账）；
+        #   2. **再决定发不发**（睡眠静默 / 同轴危机 / 小时上限都在 `plan_for_event` 里）。
+        staged = pick_event(
+            before=before_stats,
+            after=stats,
+            settings=settings.events,
+            now=now,
+            ledger=state.event_history,
+        )
+        if staged is not None:
+            state.note_event(staged.as_dict(at=now))
+            event_plan = self._injector.plan_for_event(
+                state=state,
+                settings=settings,
+                now=now,
+                event=staged,
+                rhythm=rhythm,
+            )
+            # 事件注入复用与常规注入同一套投递与记账（`plan.wants_reply` 决定是否再记一次
+            # "主动开口"），这样 respond 的小时上限对事件一样生效——
+            # 不给事件开第三条频控口子（见 core/events 的"本轮刻意不做"）。
+            if event_plan is not None:
+                submitted = await self._injector.emit(event_plan)
+                if submitted:
+                    state.note_injection(
+                        at=now, trigger=event_plan.trigger, summary=_summarize_tiers(state), stats=state.stats
+                    )
+                    if event_plan.wants_reply:
+                        state.note_respond(at=now)
 
         plan = self._injector.plan_for_tick(
             state=state,
@@ -912,6 +952,9 @@ class OurLifePlugin(NekoPluginBase):
                 "carry_max": settings.economy.carry_max,
                 "meal_threshold": settings.economy.meal_threshold,
                 "grace_hours": settings.neglect.grace_hours,
+                "events_enabled": settings.events.enabled,
+                "mood_recovery_min_interval_hours": settings.events.mood_recovery_min_interval_hours,
+                "health_recovery_min_interval_hours": settings.events.health_recovery_min_interval_hours,
                 "min_interval_sec": settings.inject.min_interval_sec,
                 "max_per_hour": settings.inject.max_per_hour,
                 "respond_max_per_hour": settings.inject.respond_max_per_hour,
@@ -930,6 +973,10 @@ class OurLifePlugin(NekoPluginBase):
         payload["state"] = state.snapshot_for_panel(now=now)
         payload["runtime"] = await self._runtime_view(state, now=now)
         payload["recent_injections"] = [dict(item) for item in state.inject_history[-8:]]
+        # 她经历过的事（v0.4.0）：面板用它列"经历"。`snapshot_for_panel` 里也有一份
+        # （上限 6 条、新的在前），这里再取一次是为了让面板拿到**比注入历史更长**的窗口——
+        # 事件与注入不是一一对应（睡过去的事件只记账、不注入）。
+        payload["recent_events"] = [dict(item) for item in state.recent_events(limit=8)]
         # 近期走势：复用注入历史里已有的数值快照（`note_injection` 落的那一份），
         # 只带 `{at, stats}` 三个非正文键，面板用字符画折线。没有历史就是空列表。
         payload["trend"] = [

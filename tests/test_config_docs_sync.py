@@ -19,6 +19,7 @@ from typing import Any, Mapping
 from our_life.core.configuration import (
     DecaySettings,
     EconomySettings,
+    EventSettings,
     FeedbackSettings,
     GrowthSettings,
     InjectSettings,
@@ -35,6 +36,7 @@ SUB_SECTIONS = (
     ("economy", EconomySettings),
     ("growth", GrowthSettings),
     ("feedback", FeedbackSettings),
+    ("events", EventSettings),
     ("neglect", NeglectSettings),
     ("inject", InjectSettings),
 )

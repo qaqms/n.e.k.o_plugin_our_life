@@ -34,6 +34,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..core.configuration import OurLifeSettings
+from ..core.events import (
+    EVENT_CHEERED_UP,
+    EVENT_SICK_RECOVERY,
+    HEALTH_RECOVERY_LINE,
+    MOOD_RECOVERY_LINE,
+    StagedEvent,
+)
 from ..core.injection import (
     TRIGGER_ANNIVERSARY,
     TRIGGER_COMPANY,
@@ -42,21 +49,101 @@ from ..core.injection import (
     TRIGGER_HUNGRY,
     TRIGGER_INTERVAL,
     TRIGGER_JUDGMENT,
+    TRIGGER_STAGED_EVENT,
     TRIGGER_TIER_CHANGE,
     TRIGGER_TIRED,
     build_text,
     resolve_ai_behavior,
 )
 from ..core.judgment import JUDGMENT_WEIGHTS
-from ..core.model import STAT_NAMES, crisis_axes
+from ..core.model import (
+    HEALTH_TIERS,
+    MOOD_TIERS,
+    STAT_NAMES,
+    crisis_axes,
+    tier_index_of,
+    tier_of,
+)
 from ..core.rhythm import Anniversary, DailyRhythm
 from .state import ShardState
 
-__all__ = ["DRIFT_THRESHOLD", "InjectionPlan", "Injector"]
+__all__ = [
+    "DRIFT_THRESHOLD",
+    "InjectionPlan",
+    "Injector",
+    "recovery_line_for",
+    "wake_suppressed",
+]
 
 # 「显著漂移」判据：任一轴距上次注入变了这么多分，才值得在非事件路径上打扰
 DRIFT_THRESHOLD = 5.0
 _HOUR = 3600.0
+
+# 事件 → 它检出的那条线（只用于把跨越写成"从哪一档到哪一档"，线本身不进正文）。
+_EVENT_RECOVERY_LINE: dict[str, float] = {
+    EVENT_SICK_RECOVERY: HEALTH_RECOVERY_LINE,
+    EVENT_CHEERED_UP: MOOD_RECOVERY_LINE,
+}
+
+
+def recovery_line_for(event: StagedEvent) -> float:
+    """事件对应的「好起来了」那条线（见 `core/events` 的档位下界判据）。"""
+    return _EVENT_RECOVERY_LINE.get(event.key, event.value - event.width)
+
+
+def wake_suppressed(
+    *,
+    event: StagedEvent,
+    settings: OurLifeSettings,
+    rhythm: "DailyRhythm | None",
+) -> bool:
+    """睡眠静默：只对"好消息"生效（`wake_ok=False`），危机解除通知照发。
+
+    这个判断与 `core/events` 的 `wake_ok` 是**同一条**语义的两处表达——
+    那边定义"这件事该不该吵醒她"，这里执行它。凌晨三点把她叫醒说"我病好了"
+    与说"我饿了"在体验上是两件不同的事：后者该被照顾，前者纯属打扰。
+    """
+    if not event.wake_ok and settings.inject.quiet_during_sleep:
+        return rhythm is not None and rhythm.sleeping
+    return False
+
+
+def _suppressed_by_same_axis(
+    *,
+    state: ShardState,
+    settings: OurLifeSettings,
+    event: StagedEvent,
+) -> bool:
+    """她还在这个轴的危机档里就不发（见 `plan_for_event` 的同轴抑制说明）。
+
+    只两条轴可能出现在事件里（病愈看健康、哄好看心情），所以这里只映射这两条——
+    不做一个通用的"任意轴 → 危机阈值"表：那份通用表已经存在于
+    `core/model.crisis_axes`，这里刻意只取**同一轴**的那一格，避免把语义扩大成
+    "任何轴危机都抑制事件"。
+    """
+    configured = {
+        "health": settings.inject.crisis_health_tier,
+        "mood": settings.inject.crisis_mood_tier,
+    }.get(event.stat)
+    if configured is None:
+        return False
+    tiers = {"health": HEALTH_TIERS, "mood": MOOD_TIERS}.get(event.stat, ())
+    if configured not in tiers:
+        # 配置里写了不存在的档名：按"没有危机阈值"处理，而不是猜一个。
+        # （`core/configuration` 不对 crisis_* 做白名单校验，所以这条是真实可能发生的输入。）
+        return False
+    return tier_index_of(event.stat, event.value) <= tiers.index(configured)
+
+
+def _behavior_for_event(*, event: StagedEvent) -> str:
+    """事件的开口档：病愈（`wake_ok=True`，危机解除通知）主动开口，哄好静默。
+
+    判据刻意用 `wake_ok` 这个**语义字段**而不是 `key == EVENT_SICK_RECOVERY`：
+    "这条该不该吵醒她"与"这条该不该主动开口"在本设计里是同一件事
+    （都是"它是不是危机解除的通知"），复用同一个字段就不会出现
+    "某个新事件该开口却没开口"的静默不一致。
+    """
+    return "respond" if event.wake_ok else "read"
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +245,64 @@ class Injector:
             judgment_label=judgment_label if trigger == TRIGGER_JUDGMENT else "",
         )
         return InjectionPlan(text=text, trigger=trigger, ai_behavior=behavior, lanlan=state.lanlan)
+
+    def plan_for_event(
+        self,
+        *,
+        state: ShardState,
+        settings: OurLifeSettings,
+        now: float,
+        event: StagedEvent,
+        rhythm: "DailyRhythm | None" = None,
+    ) -> InjectionPlan | None:
+        """阶段性事件（v0.4.0）：病愈 / 哄好。
+
+        **刻意做成与 `plan_for_tick` 并列的独立通道，而不是插进它的优先级链**，
+        原因有两个（都属于"真实会错"的那种）：
+
+        1. **不该被危机挤掉**：病愈那一拍通常整体状态已经在回升，但它可能恰好
+           仍落在别的轴的危机档里（例如刚病好但饿着）。若把它塞进单条优先级链，
+           会让"刚好了"被"还饿着"挤掉，两条都讲不成。
+        2. **不该挤掉危机**：反过来也一样——饥/累危机是"现在就饿了"，
+           不能被一件已经发生过的好事替代。
+        两条各走各的，只共享 `max_per_hour` 这个总闸门。
+
+        **同轴抑制**：她还在这个轴的危机档里就不发——"你终于好起来了"与
+        下一行"你现在病着"是自相矛盾的。判据只取**同一条轴**的危机阈值
+        （病愈看健康、哄好看心情），不牵连别的轴。
+
+        睡眠：`wake_ok=False`（哄好）在睡觉时直接不发，也不记账——
+        事件本身由 `state.note_event` 在调用侧**无条件**记下（她会醒来后
+        在面板上看到这条经历），这里只决定"要不要说话"，见 `core/events` 第 4 条。
+        """
+        if not settings.enabled or not settings.events.enabled:
+            return None
+        if wake_suppressed(event=event, settings=settings, rhythm=rhythm):
+            return None
+        inject = settings.inject
+        if len(_prune_window(state.inject_timestamps, now)) >= inject.max_per_hour:
+            return None
+        if _suppressed_by_same_axis(state=state, settings=settings, event=event):
+            return None
+
+        text = build_text(
+            stats=state.stats,
+            trigger=TRIGGER_STAGED_EVENT,
+            streak_days=state.streak_days,
+            gap_hours=None if state.last_touch_at is None else max(0.0, (now - state.last_touch_at) / _HOUR),
+            transitions=(
+                (event.stat, tier_of(event.stat, recovery_line_for(event)), tier_of(event.stat, event.value)),
+            ),
+            max_chars=inject.max_chars,
+            rhythm=rhythm,
+            day_number=state.day_number,
+            staged_event=event,
+        )
+        behavior = _behavior_for_event(event=event)
+        if behavior == "respond" and len(_prune_window(state.respond_timestamps, now)) >= inject.respond_max_per_hour:
+            # 主动开口额度用完：降级为静默注入，而不是整条丢掉（与 plan_for_tick 同一条纪律）
+            behavior = "read"
+        return InjectionPlan(text=text, trigger=TRIGGER_STAGED_EVENT, ai_behavior=behavior, lanlan=state.lanlan)
 
     def plan_for_company(self, *, state: ShardState, settings: OurLifeSettings, now: float) -> InjectionPlan | None:
         """LLM 工具「索取陪伴」：想让她主动撒娇时走这条路（带冷却）。"""

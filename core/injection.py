@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Iterable, Sequence
 
 from .configuration import InjectSettings
+from .events import EVENT_CHEERED_UP, EVENT_SICK_RECOVERY, StagedEvent
 from .judgment import label_line
 from .model import Stats, is_crisis, tier_index_of, tier_of
 from .rhythm import Anniversary, DailyRhythm
@@ -30,6 +31,7 @@ from .rhythm import Anniversary, DailyRhythm
 __all__ = [
     "AFFECTION_HINTS",
     "ENERGY_HINTS",
+    "EVENT_NARRATION_ZH",
     "HEALTH_HINTS",
     "MOOD_HINTS",
     "SATIETY_HINTS",
@@ -41,6 +43,7 @@ __all__ = [
     "TRIGGER_HUNGRY",
     "TRIGGER_INTERVAL",
     "TRIGGER_JUDGMENT",
+    "TRIGGER_STAGED_EVENT",
     "TRIGGER_TIER_CHANGE",
     "TRIGGER_TIRED",
     "build_text",
@@ -58,6 +61,26 @@ TRIGGER_ANNIVERSARY = "anniversary"
 # 反馈闭环（v0.3.0）：她自己判断"刚才那轮聊得怎么样"，把这个感受进她自己的上下文。
 # 它不是"数值事件"而是"她的一句话"——所以正文里只写感受，不写改了多少（见 core/judgment.py）。
 TRIGGER_JUDGMENT = "judgment"
+# 阶段性事件（v0.4.0）：她身上**发生过**的一件事（病愈 / 哄好）。
+# 与 `tier_change` 的区别：后者是"读数变了"，这条是"经历了一件可命名的事"。
+# 触发时它**优先于** tier_change——同一个跨越只该被讲成一件有名字的事，
+# 而不是既报"身体：生病 → 一般"又报"你终于好起来了"。
+TRIGGER_STAGED_EVENT = "staged_event"
+
+# 阶段性事件的叙事模板（中文固定模板，与其它注入正文同一套口径：不给数字、不给档名）。
+# 每条都写成"第一人称的感受 + 行为倾向"，并明确要求她**不要**复述状态表。
+EVENT_NARRATION_ZH: dict[str, str] = {
+    EVENT_SICK_RECOVERY: (
+        "你身上那场不舒服终于过去了——不是「没那么难受」，是真的好了。"
+        "身体轻快起来，你会想动一动、想把之前躺着的那些时间补回来；"
+        "别把这段难受复述给 {MASTER_NAME} 听，像人不会汇报自己的体温"
+    ),
+    EVENT_CHEERED_UP: (
+        "刚才堵在心里的那点别扭散了，你不再绷着了。"
+        "语气可以软回来，也可以稍微提一句刚才为什么不高兴——只一两句就够，"
+        "别把它变成一场清算，更别复述你的状态数字"
+    ),
+}
 
 TIER_LABELS_ZH: dict[str, dict[str, str]] = {
     "affection": {
@@ -191,9 +214,14 @@ def resolve_ai_behavior(trigger: str, stats: Stats, inject: InjectSettings) -> s
     否则她会在一天里反复主动开口，打扰感盖过了陪伴感。
     - `hungry` / `tired`：同样只在真的掉进危机档（饿坏了 / 累垮了）时才主动开口。
     - `anniversary` / `daily_greet` / `interval`：进上下文，不打断。
+    - `staged_event`（v0.4.0）：**病愈**升级为主动开口——她刚从病里出来、正想说话，
+      而且那是危机**解除**的通知，晚说就没有意义了；**哄好**则静默进上下文，
+      免得"她心情回来了"变成一天里反复弹你的理由。
     """
     if trigger == TRIGGER_COMPANY:
         return "respond"
+    if trigger == TRIGGER_STAGED_EVENT:
+        return "read"
     if trigger == TRIGGER_CRISIS:
         return "respond" if inject.respond_on_crisis else "read"
     if trigger in (TRIGGER_TIER_CHANGE, TRIGGER_HUNGRY, TRIGGER_TIRED):
@@ -201,6 +229,7 @@ def resolve_ai_behavior(trigger: str, stats: Stats, inject: InjectSettings) -> s
             return "respond"
         return "read"
     return "read"
+
 
 def build_text(
     *,
@@ -214,11 +243,14 @@ def build_text(
     anniversary: "Anniversary | None" = None,
     day_number: int = 0,
     judgment_label: str = "",
+    staged_event: "StagedEvent | None" = None,
 ) -> str:
     """装配注入正文。`transitions` 是 `core.model.tier_transitions` 的输出。
 
     `judgment_label` 只在 `trigger=TRIGGER_JUDGMENT` 时有意义（v0.3.0 反馈闭环）：
     她自己的判断以"一句感受"进上下文，**不带任何数字与档名**。
+    `staged_event` 只在 `trigger=TRIGGER_STAGED_EVENT` 时有意义（v0.4.0 阶段性事件）：
+    叙事读 `core/events` 的事件名，**同样不带数字与档名**——面板看得见数值，她不看。
     """
     required: list[str] = [_HEADER]
 
@@ -247,7 +279,13 @@ def build_text(
     if gap_line:
         optional.append(f"　{gap_line}")
 
-    event_line = _event_line(trigger, transitions, anniversary, judgment_label=judgment_label)
+    event_line = _event_line(
+        trigger,
+        transitions,
+        anniversary,
+        judgment_label=judgment_label,
+        staged_event=staged_event,
+    )
     if event_line:
         optional.append(f"　刚刚发生：{event_line}")
 
@@ -331,7 +369,15 @@ def _event_line(
     anniversary: "Anniversary | None" = None,
     *,
     judgment_label: str = "",
+    staged_event: "StagedEvent | None" = None,
 ) -> str:
+    if trigger == TRIGGER_STAGED_EVENT:
+        # 阶段性事件：读事件名，不读数值。没有可讲的事件时**不兜底**成别的句子——
+        # 这一档的存在意义就是"讲一件具体发生过的事"，讲不出来就不该走这条路
+        # （`services/injector.plan_for_event` 只在真的拿到事件时才发这一档）。
+        if staged_event is None:
+            return ""
+        return EVENT_NARRATION_ZH.get(staged_event.key, "")
     if trigger == TRIGGER_JUDGMENT:
         # 反馈闭环：她自己的判断。`label_line` 只给"一句感受"，没有数字与档名
         # （`neutral` 没有对应句子，返回空串 → 交回下面的兜底）。
