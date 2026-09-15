@@ -444,6 +444,13 @@
     `daily_allowance_granted` 只有 `_settle` 写，没有第二个写者会丢更新。
     **但这条窗口没有测试门覆盖**——今后新增"入口/工具写、tick 消费"的双写字段时，
     必须回头评估这里（或改成单一队列 / 加 `threading.Lock`）。
+16. **面板全白但五门全绿、宿主零日志**（v0.8.0 真机踩到，**未修**）：宿主链接 hosted-tsx 时
+    会漏剥 `ui/components/state_page.tsx` 的顶层 `export function StatePage`，而面板文档是普通
+    `<script>` → 整段 `SyntaxError` 不执行 → **空白、不弹错、不进日志、`context` 端点还是 200**。
+    `check-hosted-tsx` 只做文本契约、**从不执行链接产物**，拦不到它。插件侧已验证的规避：
+    把那个 `export function` 整块移到文件最前（紧跟 import）即正常剥离。
+    完整诊断链、已排除项与未定位部分见 DESIGN.md「已知陷阱」§17。
+    **在那之前 v0.8.0 发包面板不可用**，不要拿 `dist/our_life-0.8.0.neko-plugin` 做面板验收。
 
 
 ## 发版校验（五门）

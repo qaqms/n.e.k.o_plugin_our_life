@@ -496,6 +496,26 @@ WebSocket/推送式面板同步（宿主 context 模型是拉式，不自造通�
     ⇒ 修法：进门之前 `our_life._GAME_RNG.seed(...)`，**并断言抽出的序列不含同点**
     （钉了种子不等于安全：谁改了抽牌方式，要响亮地报出来，而不是留一句 `won is False` 让人猜）。
 
+17. **hosted-tsx 链接器会把一条顶层 `export` 漏在原生产物里 → 面板全白且零报错**（v0.8.0 真机踩到，**未修**）：
+    面板文档用的是普通 `<script>`（不是 `type="module"`），所以产物里只要残留**任何**一条顶层
+    `export` 语句，整段脚本就 `SyntaxError: Unexpected token 'export'`、一行都不执行。表现是
+    **纯白面板**，而且因为脚本压根没跑起来，连 `neko-hosted-surface-error` 都发不出去——宿主不弹
+    错误面板、宿主日志零记录、`props.state` 那条链路也仍是健康的（context 端点 200 / 85 KB / 无 warning）。
+    **五门拦不住它**：`check-hosted-tsx` 只按文本契约校验 export/import 形状，**从不执行链接产物**。
+    - 真机事实：`ui/components/state_page.tsx` 第 252 行 `export function StatePage(props: {...`
+      在宿主链接产物里**没被剥掉**（同批 9 个依赖全部正常剥离）。把真机 context 原样喂进 happy-dom
+      挂载 → `root.innerHTML.length === 0`，与用户看到的空白逐字一致。诊断链见本轮台账。
+    - **定位状态（不要当成已结案）**：触发点在**本文件更靠前的某处**，确切构造**尚未定位**。
+      已核实的三条：① 逐行删第 1..251 行，**无一**能修复（所以不是单行问题）；
+      ② 把全文件 `<X/>` 改写为 `<X></X>`、或删掉那行内联三元，**都不修复**；
+      ③ **把 `export function StatePage` 整块移到 import 之后（文件最前）→ 立刻正常剥离**。
+      机制嫌疑：链接器扫描器的正则字面量判定（`canStartHostedRegexLiteral` 的合法前缀集合里含 `<`，
+      而该函数注释自己写明「必须与后端 `ui_query_service.py` 的扫描器逐字节同步」），怀疑前文某个 `/`
+      被当成正则起点一路吞过导出行——**这是推测，未证实**。
+    - 属**宿主侧缺陷**（本仓不改宿主）。插件侧已有可用规避 = 上面第 ③ 条。
+      下一轮真修时，验收门必须**真的执行链接产物**（happy-dom 挂载并断言 `#root` 非空），
+      光跑 `check-hosted-tsx` 会继续假绿。**在那之前 v0.8.0 的面板不可用**，不要对外发包。
+
 ## Risk Follow-ups
 
 - **惩罚式衰减的用户体验**：拟真衰减会让长期不互动明显掉档。默认 `enabled = false` 是唯一知情同意闸门；
