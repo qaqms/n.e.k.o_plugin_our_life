@@ -25,7 +25,7 @@ keywords = [
     "tamagotchi",
     "care",
 ]
-version = "0.6.0"
+version = "0.7.0"
 type = "plugin"
 entry = "plugin.plugins.our_life:OurLifePlugin"
 
