@@ -6,7 +6,7 @@
 ## Identity Lock
 
 - plugin_id: `our_life`
-- folder: `F:\ai\neko kaifa2\n.e.k.o_plugin_our_life`（开发工作区，仓库名 `n.e.k.o_plugin_our_life`）
+- folder: `D:\neko kaifa\n.e.k.o_plugin_our_life`（开发工作区，仓库名 `n.e.k.o_plugin_our_life`）
 - 挂载态目录名: `our_life` —— 宿主按 entry 的包名匹配目录名，**必须是合法标识符**，
   所以开发工作区目录名不能直接挂载（见「已知陷阱」§11）
 - name: `我们的生活`
@@ -37,8 +37,9 @@
   - lifecycle：startup 装配、shutdown 落盘
   - timer：周期采样行为（只读总线）+ 节律折算 + 自动进食 + 经济结算 + 注入判定
   - message injection：`push_message(visibility=[], ai_behavior="read"|"respond", coalesce_key=...)`
-  - UI：Hosted TSX panel（v0.4.1 起为「顶部常驻状态带 + Tabs 四页」：
-    总览(走势/节律) / 过日子(顾问/商店/背包) / 她的世界(感受/事件) / 管理(纠偏/注入史/配置)）
+  - UI：Hosted TSX panel（「顶部常驻状态带 + Tabs」，v0.8.0 起六页：
+    总览(今日/五轴/节律) / 打卡·打工 / 过日子(顾问/商店/背包) / 她的世界(感受/事件) /
+    **状态**(她的自述 + 身体/作息/我们/她的想法/她的一天) / 管理(纠偏/注入史/配置)）
   - store：`PluginStore` 持久化（必须 `[plugin.store].enabled = true`，否则静默不落盘）
   - i18n：zh-CN / en（其余语言后续补齐，见"路线图"）
 - inferred architecture:
@@ -146,6 +147,34 @@ v0.1.0（首版）：
 5. LLM 工具两个：她查询自身状态、她主动索取陪伴（带冷却）
 6. fail-closed 总开关 `[our_life].enabled = false`（默认关：未打开前不注入、不结算、不推送）
 7. 中英 i18n、`tests/` 数值门 + i18n 契约门、`tools/release_gate.py` 五门
+
+## v0.8.0 Scope（「她此刻的状态」页：自述 + 四段档案）
+
+用户反馈：现有角色状态太简单。本轮加一个**专属页面**回答"她现在怎么样、为什么"，
+与总览的"每一项现在多少"分工不同。**零新配置、零新入口、零新权限、schema 不变**（全为读侧派生）。
+
+1. **新判据层 `core/state_note.py`**（纯函数、零 SDK）：选自述句、定句数、算跨轴拖累。
+   判据不进 TSX，否则会出现"面板上说的与她注入时说的不是一回事"且无门可管。
+2. **自述句数随等级变动**（用户口径）：危机 3 句 / 偏低 2 句 / 平稳 1 句。
+   关键取舍：**好感不参与升级判据**（`_DAILY_AXES`）——`Stats.affection` 默认就是 20.0（档 1），
+   把它当"偏低"会让**每个新角色永远**多说一句"我还不太敢跟你撒娇"。
+3. **顺序三层**：危机档最先 → 离中性档最远 → **同距离按 `STAT_NAMES`**。第 3 层是正确性而不是审美：
+   否则"差 0.1 分的好感"会插到"精力累垮"前面。
+4. **与 `build_text` 是平行出口不是复用**：注入文案是给模型的第二人称行为指令
+   （`_FOOTER` 禁数字禁机制），面板是给你的第三人称档案；复用会把两条语义搅在一起。
+5. **整句键，绝不逐词拼**（`panel.stateVoice.<轴>.<档>` 25 格）：中英词序不同，
+   拼词在 en 下必坏（forever_companion 第九轮的同一课）。
+6. **新补的拼接族结构门**：`stateVoice`（双向含孤儿键）、`stateCoupling`、`judgment`、`panel.stat`。
+   动态拼键不在引用面门的射程里——缺文案不会报错，只会喷一个空引号。
+7. **耦合因果第一次给主人看**：`coupling_codes` 直接消费 `COUPLING_FACTORS` 算出的因子，
+   **不在本层重算阈值**（否则面板说她饿与心情真掉得快就有两个来源，早晚漂移）。
+
+### 本轮踩到并已修的坑
+
+- **后端判据不能只在独立仓跑**：`voice_keys` 初版把"数值"排在 `STAT_NAMES` 之前，
+  默认好感 20.0 就会插到精力前面——单看函数签名看不出来，是手写四组样本跑出来的。
+- **未登记标签会变空白徽章**：`_mind_view` 初版只判"非空字符串"，模型给了没登记的词
+  就会拼出 i18n 里不存在的键。现按 `JUDGMENT_LABELS` 白名单收窄（行为门钉住）。
 
 ## v0.7.0 Scope（金币系统完善：签到日历 / 双向打工 / 商店深化）
 
@@ -383,8 +412,8 @@ WebSocket/推送式面板同步（宿主 context 模型是拉式，不自造通�
 
 ## Write Workspace
 
-`F:\ai\neko kaifa2\n.e.k.o_plugin_our_life\`（独立 Git 仓库；不触碰 N.E.K.O 源码树）。
-宿主仓在同级的 `F:\ai\neko kaifa2\N.E.K.O\` —— `tools/release_gate.py` 的默认宿主探测
+`D:\neko kaifa\n.e.k.o_plugin_our_life\`（独立 Git 仓库；不触碰 N.E.K.O 源码树）。
+宿主仓在同级的 `D:\neko kaifa\N.E.K.O\` —— `tools/release_gate.py` 的默认宿主探测
 （`PLUGIN_ROOT.parent / "N.E.K.O"`）正好命中这个布局，无需 `--host-root`。
 
 ## 已知陷阱（实现时必须绕开，均源码核实）
