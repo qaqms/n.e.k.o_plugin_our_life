@@ -39,14 +39,17 @@ from plugin.sdk.plugin import (
 )
 
 from .core import (
+    AFFECTION_TIERS,
     GAME_KINDS,
     ITEM_ORDER,
     JOB_ORDER,
     JUDGMENT_LABELS,
     STAT_NAMES,
     TRIGGER_COMPANY,
+    UNLOCKED_GIFTBOX_TIER,
     OurLifeSettings,
     Stats,
+    UnlockFacts,
     advance_streak,
     advise,
     anniversary_of,
@@ -71,15 +74,19 @@ from .core import (
     consume_challenge,
     crisis_axes,
     daily_block_reason,
+    daily_deals,
     daily_income,
     effects_for,
     eventful_tier_transitions,
+    fresh_unlocks,
     is_crisis,
     is_valid_day,
     item,
     job_catalog,
     job_narration,
     judge,
+    keepsake_daily,
+    keepsake_yield_days,
     local_day,
     makeup_reason,
     meal_need_per_day,
@@ -101,6 +108,9 @@ from .core import (
     streak_milestone_bonus,
     submit_arith,
     submit_hielo,
+    tier_index_of,
+    unit_cost,
+    visible_ids,
     wage_preview,
     week_key,
 )
@@ -253,7 +263,7 @@ class OurLifePlugin(NekoPluginBase):
         return Ok({"status": "tick_done", "roles": len(roles)})
 
     async def _settle(self, lanlan: str, records: tuple[Any, ...], *, now: float) -> None:
-        """一个角色卡的一拍：作息折算 → 行为结算 → 进食 → 经济 → 落盘 → 注入判定。"""
+        """一个角色卡的一拍：作息折算 → 行为结算 → 进食 → 经济（含收藏件产出与商店锁存）→ 落盘 → 注入判定。"""
         if not lanlan:
             return
         settings = self._settings
@@ -323,14 +333,18 @@ class OurLifePlugin(NekoPluginBase):
             stats = apply_neglect(stats, delta_days=delta_days, neglect=settings.neglect)
             state.neglect_days_applied = entitlement
 
-        # 4) 金币与日账（跨天重置消费上限、发放零花钱、结算日薪）+ 打工日账重置
-        self._settle_account(
+        # 4) 金币与日账（跨天重置消费上限、发放零花钱、结算日薪、收藏件产出）+ 打工日账重置
+        keepsake_stats = self._settle_account(
             state,
             today=today,
             turns=summary.user_turns if had_new else 0,
             is_new_day=is_new_day,
             streak=streak,
+            now=now,
         )
+        if keepsake_stats:
+            # 收藏件的轴数值产出走 `apply_item` 的夹取路径（coins 键已在产出侧剥掉）。
+            stats = apply_item(stats, keepsake_stats)
         state.reset_job_day(today=today)
         # 玩家打工的日额度账与班次账同一条日界线；入口也会各自 reset（幂等）。
         state.reset_game_day(today=today)
@@ -501,9 +515,15 @@ class OurLifePlugin(NekoPluginBase):
         turns: int,
         is_new_day: bool,
         streak: int,
-    ) -> None:
-        """跨天重置 + 零花钱 + 日薪。"""
+        now: float,
+    ) -> dict[str, float]:
+        """跨天重置 + 零花钱 + 日薪 + 商店锁存 + 收藏件产出。
+
+        返回值是收藏件本次发放的**轴数值增量**（金币已直接入账）；
+        调用方负责把它 `apply_item` 到结算流里的工作数值上。
+        """
         economy = self._settings.economy
+        prev_account_date = state.account_date
         if state.account_date != today:
             state.account_date = today
             state.daily_spent = 0
@@ -511,8 +531,14 @@ class OurLifePlugin(NekoPluginBase):
         # 反馈闭环的当日修正预算和日账同一条日界线（`_settle` 里也调一次，
         # 因为工具可能先于 tick 被调用——两处都调是幂等的）。
         state.reset_judgment_day(today=today)
+        # 商店锁存账随日界线滚动（tick 是唯一必达的观测点；入口成功购买时也会
+        # latch，两处幂等）。总开关关掉时 `_settle` 根本不会走到这里——冻结世界
+        # 里她的经历不进账，与数值不演化是同一条 fail-closed 契约。
+        fresh = fresh_unlocks(self._shop_unlock_facts(state, now=now), state.shop_unlocked)
+        if fresh:
+            state.latch_shop_unlocks(fresh)
         if not economy.enabled:
-            return
+            return {}
         if turns > 0:
             state.sodas += daily_income(
                 turns=turns,
@@ -526,6 +552,20 @@ class OurLifePlugin(NekoPluginBase):
         if not state.daily_allowance_granted:
             state.sodas += max(0, int(economy.daily_allowance))
             state.daily_allowance_granted = True
+        # 收藏件每日产出：跨天按缺席天数补发（封顶 `YIELD_BACKFILL_CAP` 天）。
+        # 与零花钱的"跨天只发当天一份"刻意不同："不上线也在攒"是收藏件的卖点，
+        # 封顶防一次长假回来凭空多出一大笔（用户拍板于 v0.7.0 商店深化）。
+        # 买入当天不产：产出从次日日界线起算（`keepsake_yield_days` 同日返回 0）。
+        yields = keepsake_daily(state.inventory)
+        if not yields:
+            return {}
+        grant_days = keepsake_yield_days(prev_account_date, today)
+        if grant_days <= 0:
+            return {}
+        coins_part = yields.get("coins", 0.0) * grant_days
+        if coins_part:
+            state.sodas += int(round(coins_part))
+        return {key: float(amount) * grant_days for key, amount in yields.items() if key != "coins"}
 
     def _auto_meal(
         self, state: ShardState, *, stats: Stats, now: float, day: str, rhythm: Any
@@ -627,6 +667,44 @@ class OurLifePlugin(NekoPluginBase):
             "anniversary": _anniversary_dict(self._anniversary(state, today=rhythm.date_iso)),
             "feedback": self._feedback_view(state),
         }
+
+    def _shop_unlock_facts(self, state: ShardState, *, now: float) -> UnlockFacts:
+        """解锁判据的"事实四元组"：全部读**已有台账**，不新造任何状态。
+
+        好感档用"实时是否达线"；是否永不回退由锁存账 `shop_unlocked` 决定
+        （见 core/shop.py 模块 docstring 的取舍段）。
+        """
+        today = local_day(now)
+        lucky_today = any(day == today and lucky for day, _coins, lucky in state.checkin_log)
+        return UnlockFacts(
+            job_shifts_total=state.job_shifts_total,
+            checkin_best=state.checkin_best,
+            affection_close=tier_index_of("affection", state.stats.affection)
+            >= AFFECTION_TIERS.index(UNLOCKED_GIFTBOX_TIER),
+            lucky_today=lucky_today,
+        )
+
+    def _shop_view(self, state: ShardState, *, now: float) -> list[dict[str, Any]]:
+        """今日货架：可见性过滤 + 特惠价复算。**未解锁的货根本不出现在这份表里**。
+
+        条目里的 `price` 就是后端今天会收的单价（`unit_cost` 单一来源）；
+        面板只是转述，即便前端改了显示，`shop_entry` 成交时还会再算一遍。
+        """
+        facts = self._shop_unlock_facts(state, now=now)
+        pool = visible_ids(facts, state.shop_unlocked)
+        day = local_day(now)
+        deals = daily_deals(day, state.lanlan, pool)
+        out: list[dict[str, Any]] = []
+        for entry in _shop_catalog():
+            item_id = str(entry["id"])
+            if item_id not in pool:
+                continue
+            pct = deals.get(item_id, 0)
+            entry["deal"] = pct > 0
+            entry["discount_pct"] = pct
+            entry["price"] = unit_cost(day, state.lanlan, pool, item_id)
+            out.append(entry)
+        return out
 
     def _job_context_view(self, state: ShardState, *, now: float) -> dict[str, Any]:
         """打工面板块：snapshot 的 `job` 读数 + 目录 + 配置旋钮。
@@ -868,6 +946,10 @@ class OurLifePlugin(NekoPluginBase):
         catalog_item = _item_of(item)
         if catalog_item is None:
             return Err(SdkError("invalid_item"))
+        if catalog_item.keepsake:
+            # 收藏件是"拥有"不是"用掉"：给它吃等于把永久每日产出吞成一次性效果，
+            # 行为上不成立（面板背包卡对收藏件也不渲染「给她」按钮，这里是后端的硬门）。
+            return Err(SdkError("item_keepsake"))
         now = time.time()
         state = await self._load_for_read(lanlan)
         if state.inventory.get(catalog_item.id) <= 0:
@@ -929,6 +1011,16 @@ class OurLifePlugin(NekoPluginBase):
         economy = self._settings.economy
         now = time.time()
         state = await self._load_for_read(lanlan)
+        found = _item_of(item)
+        if found is None:
+            return Err(SdkError("invalid_item"))
+        # 货架可见性在后端复算：未解锁/非当日限定的货，伪造参数也只能撞到 `shop_locked`。
+        # 和小游戏同一层威胁模型：面板参数可任意伪造（见 DESIGN.md）。
+        facts = self._shop_unlock_facts(state, now=now)
+        pool = visible_ids(facts, state.shop_unlocked)
+        if item not in pool:
+            return Err(SdkError("shop_locked"))
+        # 成交价只认后端的确定性哈希——面板显示什么不算数。
         plan = recharge_plan(
             item_id=item,
             quantity=quantity,
@@ -936,12 +1028,15 @@ class OurLifePlugin(NekoPluginBase):
             coins=state.sodas,
             daily_spent=state.daily_spent,
             daily_limit=economy.shop_daily_limit,
+            unit_cost=unit_cost(local_day(now), lanlan, pool, item),
         )
         if not plan.ok:
             return Err(SdkError(plan.reason))
         carried = state.inventory.with_added(plan.item_id, plan.quantity)
         if economy.carry_max > 0 and carried.get(plan.item_id) > economy.carry_max:
             return Err(SdkError("carry_full"))
+        # 买到了 = 判据此刻必然满足：把永久件的解锁线锁存下来（好感掉了也不收回）。
+        state.latch_shop_unlocks(fresh_unlocks(facts, state.shop_unlocked))
         state.inventory = carried
         state.sodas -= plan.total_cost
         state.daily_spent += plan.total_cost
@@ -952,6 +1047,8 @@ class OurLifePlugin(NekoPluginBase):
                 "store_available": self._store.store_available,
                 "item": plan.item_id,
                 "quantity": plan.quantity,
+                "unit": plan.unit_cost,
+                "deal": plan.unit_cost < found.cost_sodas,
                 "cost": plan.total_cost,
                 "sodas": state.sodas,
                 "inventory": state.inventory_counts(),
@@ -1718,15 +1815,18 @@ class OurLifePlugin(NekoPluginBase):
                 "respond_on_crisis": settings.inject.respond_on_crisis,
                 "quiet_during_sleep": settings.inject.quiet_during_sleep,
             },
-            "shop": _shop_catalog(),
         }
         if not lanlan:
             payload["state"] = None
             payload["recent_injections"] = []
             payload["error_code"] = "invalid_lanlan"
+            # 今日货架随分片走：没有分片就没有"她的经历"，货架空而不是泄底全表。
+            payload["shop"] = []
             return payload
         state = await self._touch_shard(lanlan, now=now)
         payload["state"] = state.snapshot_for_panel(now=now)
+        # 今日货架（v0.7.0）：可见性过滤 + 特惠价都在后端复算，必须拿到分片后才算。
+        payload["shop"] = self._shop_view(state, now=now)
         payload["checkin"] = self._checkin_context_view(state, now=now)
         payload["job"] = self._job_context_view(state, now=now)
         payload["games"] = self._games_context_view(state, now=now)
@@ -2090,7 +2190,12 @@ def _axis_view(state: ShardState, *, now: float) -> dict[str, Any]:
 
 
 def _shop_catalog() -> list[dict[str, Any]]:
-    """商店货架（面板直接渲染；价格与效果都来自 `core/economy.ITEMS` 单一来源）。"""
+    """商店货架的**静态底层**（字段单一来源在 `core/economy.ITEMS`）。
+
+    v0.7.0 起不直接外发：面板拿到的货架是 `_shop_view` 在这份表上
+    叠加"可见性过滤 + 今日价"之后的结果。`price` 缺省等于标价，
+    `rarity`/`keepsake`/`daily` 是呈现层字段（解锁与折扣判定都不读它们）。
+    """
     from .core.economy import ITEM_ORDER, ITEMS
 
     out: list[dict[str, Any]] = []
@@ -2101,8 +2206,12 @@ def _shop_catalog() -> list[dict[str, Any]]:
                 "id": entry.id,
                 "kind": entry.kind,
                 "cost": entry.cost_sodas,
+                "price": entry.cost_sodas,
                 "food": entry.food,
                 "carry_max": entry.carry_max,
+                "rarity": entry.rarity,
+                "keepsake": entry.keepsake,
+                "daily": [[name, amount] for name, amount in entry.daily],
                 "effects": [[name, delta] for name, delta in entry.effects],
             }
         )

@@ -118,6 +118,14 @@ export type ShopEntry = {
   food?: boolean
   carry_max?: number
   effects?: [string, number][]
+  // v0.7.0 商店深化：`price` 是后端今天会收的价（特惠日已折）；
+  // `rarity`/`keepsake`/`daily` 是呈现层字段，解锁与折扣判定都不读它们。
+  price?: number
+  deal?: boolean
+  discount_pct?: number
+  rarity?: string
+  keepsake?: boolean
+  daily?: [string, number][]
 }
 
 // 打工面板块：`snapshot.job` 读数 + `_job_context_view` 补的目录与旋钮。

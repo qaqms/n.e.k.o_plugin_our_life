@@ -11,6 +11,8 @@ export type BagItem = {
   label: string
   count: number
   effects: string
+  // v0.7.0：收藏件不可被消耗——卡上不渲染「给她」，只标注摆着（后端 `feed` 另有硬门）。
+  keepsake?: boolean
 }
 
 export function Bag(props: {
@@ -29,9 +31,13 @@ export function Bag(props: {
               <Stack gap={8}>
                 <StatusBadge tone="info" label={`×${entry.count}`} />
                 <Text>{entry.effects}</Text>
-                <Button tone="primary" disabled={!props.enabled} onClick={() => props.onGive(entry.id)}>
-                  {t("panel.bag.give")}
-                </Button>
+                {entry.keepsake ? (
+                  <Text>{t("panel.bag.giveKeepsake")}</Text>
+                ) : (
+                  <Button tone="primary" disabled={!props.enabled} onClick={() => props.onGive(entry.id)}>
+                    {t("panel.bag.give")}
+                  </Button>
+                )}
               </Stack>
             </Card>
           ))}

@@ -370,14 +370,33 @@ export default function Panel(props: PanelProps) {
       .map(([name, delta]) => `${t(`panel.stat.${name}`, { defaultValue: name })} ${delta > 0 ? "+" : ""}${delta}`)
       .join(" · ")
 
+  // 收藏件的每日产出文本（v0.7.0）：`coins` 不是五轴，单独走 `panel.daily.coins`；
+  // 轴数值键与效果行同源（`panel.stat.<轴>`）。
+  const dailyText = (entry: ShopEntry): string =>
+    (entry.daily ?? [])
+      .map(
+        ([name, amount]) =>
+          `${name === "coins" ? t("panel.daily.coins") : t(`panel.stat.${name}`, { defaultValue: name })} +${amount}`,
+      )
+      .join(" · ")
+
+  // 稀有度徽章色：珍品=金（warning），讲究=蓝（info），常规=默认灰。
+  // 纯呈现层——解锁与折扣判定都不读稀有度（单一事实在 core/shop.py）。
+  const rarityTone = (rarity?: string): any =>
+    rarity === "rare" ? "warning" : rarity === "uncommon" ? "info" : "default"
+
   // 背包卡的呈现数据（v0.6.0）：只有"在她手上"的物品进卡，顺序跟商店目录一致。
+  // v0.7.0：收藏件不渲染效果行而渲染产出行（「给她」按钮在 bag 组件里按 keepsake 收起）。
   const bagItems = catalog
     .filter((entry) => (inventory[String(entry.id ?? "")] ?? 0) > 0)
     .map((entry) => ({
       id: String(entry.id ?? ""),
       label: t(`panel.item.${entry.id ?? "unknown"}`, { defaultValue: String(entry.id ?? "-") }),
       count: inventory[String(entry.id ?? "")] ?? 0,
-      effects: t("panel.shopEffects", { effects: effectText(entry) }),
+      effects: entry.keepsake
+        ? t("panel.shop.daily", { income: dailyText(entry) })
+        : t("panel.shopEffects", { effects: effectText(entry) }),
+      keepsake: Boolean(entry.keepsake),
     }))
 
   const daysRemaining = advisor.days_remaining
@@ -489,8 +508,20 @@ export default function Panel(props: PanelProps) {
               {catalog.map((entry) => (
                 <Card key={String(entry.id)} title={t(`panel.item.${entry.id ?? "unknown"}`, { defaultValue: entry.id ?? "-" })}>
                   <Stack gap={8}>
-                    <Text>{`${t("panel.field.sodas")} ${entry.cost ?? "-"}`}</Text>
-                    <Text>{t("panel.shopEffects", { effects: effectText(entry) })}</Text>
+                    <Inline gap={6}>
+                      <StatusBadge tone={rarityTone(entry.rarity)} label={t(`panel.rarity.${entry.rarity ?? "common"}`, { defaultValue: entry.rarity ?? "-" })} />
+                      {entry.deal ? <StatusBadge tone="warning" label={t("panel.shop.deal", { pct: entry.discount_pct ?? 0 })} /> : null}
+                    </Inline>
+                    <Text>
+                      {entry.deal && entry.price !== undefined && entry.price !== entry.cost
+                        ? `${t("panel.field.sodas")} ${entry.price}（${t("panel.shop.dealWas", { cost: entry.cost ?? "-" })}）`
+                        : `${t("panel.field.sodas")} ${entry.cost ?? "-"}`}
+                    </Text>
+                    <Text>
+                      {entry.keepsake
+                        ? `${t("panel.shop.keepsake")} · ${t("panel.shop.daily", { income: dailyText(entry) })}`
+                        : t("panel.shopEffects", { effects: effectText(entry) })}
+                    </Text>
                     <Text>
                       {(inventory[String(entry.id)] ?? 0) > 0
                         ? t("panel.shopOwned", { count: inventory[String(entry.id)] ?? 0 })

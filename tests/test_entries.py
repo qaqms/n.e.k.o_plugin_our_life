@@ -928,7 +928,9 @@ def test_shop_rejects_with_stable_codes(make_plugin: Any, run_async: Any) -> Non
     assert str(broke.error) == "insufficient_sodas"
 
     unknown = run_async(plugin.shop_entry(item="gold_apple", quantity=1, _ctx={"lanlan_name": "灵"}))
-    assert str(unknown.error) == "unknown_item"  # 商店侧的稳定码；照料入口用的是 invalid_item
+    # v0.7.0 收编：旧版商店侧发的是未注册的 `unknown_item`（不进 PANEL_ERROR_CODES，
+    # 面板翻不出文案）——与照料入口统一成已登记的 `invalid_item`。
+    assert str(unknown.error) == "invalid_item"
 
     zero = run_async(plugin.shop_entry(item="meat", quantity=0, _ctx={"lanlan_name": "灵"}))
     assert str(zero.error) == "invalid_quantity"

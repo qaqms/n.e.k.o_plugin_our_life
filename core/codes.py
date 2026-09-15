@@ -41,6 +41,8 @@ PANEL_ERROR_CODES: frozenset[str] = frozenset(
         "insufficient_sodas",  # 金币不够
         "carry_full",  # 携带上限已满
         "over_daily_limit",  # 触发当日消费上限
+        "shop_locked",  # 未解锁/非当日限定的货（后端复核挡伪造参数）
+        "item_keepsake",  # 收藏件不可被消耗（只能拥有，不能用掉）
         # 商店 / 照料（成功档）
         "shop_purchased",  # 买到了
         "care_applied",  # 用掉了一件东西

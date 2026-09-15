@@ -41,7 +41,8 @@ def test_every_catalog_item_is_addressable_and_ordered() -> None:
         assert found is not None
         assert found.id == item_id
         assert found.cost_sodas > 0
-        assert found.effects, f"{item_id} has no effect, so buying it would do nothing"
+        # v0.7.0："买了总得有什么用"有两种形态——即时效果（消耗品）或每日产出（收藏件）。
+        assert found.effects or found.daily, f"{item_id} has neither effects nor daily yield"
 
 
 def test_only_food_items_can_be_eaten() -> None:

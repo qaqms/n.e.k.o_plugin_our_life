@@ -11,6 +11,9 @@
 
 **schema 版本与向后兼容**（v0.4.0 起）：
 
+- `_SCHEMA_VERSION = 6`：新增**商店锁存账**（`shop_unlocked`：已达解锁线、永不回退
+  的永久件 id 集合；幸运符刻意不在锁存词表内，见 `core/shop.normalize_unlocks`）。
+  旧分片缺键 = 空账，首次满足判据时由入口/tick 重新 latch，无需迁移。
 - `_SCHEMA_VERSION = 5`：新增**签到台账**（`checkin_log`：`(日期, 金币, 是否幸运)`；
   `checkin_makeups`：补签过的日子；`checkin_streak/checkin_best`：从集合重算的显示缓存；
   `makeup_week/makeup_used`：补签周计数）与**打工台账**（`job_id/job_start_at/job_end_at`
@@ -52,6 +55,7 @@ from ..core.economy import Inventory, observed_meals_per_day
 from ..core.games import challenge_public_view, normalize_challenge, normalize_game_counts
 from ..core.model import STAT_NAMES, Stats
 from ..core.rhythm import day_number_of
+from ..core.shop import normalize_unlocks
 
 __all__ = [
     "EVENT_HISTORY_MAX",
@@ -81,7 +85,8 @@ JUDGMENT_HISTORY_MAX = 12
 # 十二条同时是冷却窗口的"记忆长度"：默认最紧的冷却是 6h，一天最多 4 条，
 # 所以 12 条永远覆盖得下一整天的冷却判定（见 core/events.pick_event 的说明）。
 EVENT_HISTORY_MAX = 12
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
+
 
 def shard_key(lanlan: str) -> str:
     return f"{KEY_PREFIX}{lanlan}"
@@ -189,6 +194,11 @@ class ShardState:
     game_earned_total: int = 0
     # 最近一局结果（面板展示用）：{kind, at, coins, correct, rounds, perfect}。
     game_last: dict[str, Any] = field(default_factory=dict)
+    # --- 商店锁存账（v0.7.0，schema 6）---
+    # 已达解锁线的永久件 id（升序去重）。好感档会掉，但限定礼盒"见识过就不收回"；
+    # 判据单调的皇家肉干/布丁也进账，只为"货架只增不减"的体验承诺。
+    # 幸运符永不进账（当日限定），读侧 `normalize_unlocks` 硬性拦。判据在 core/shop.py。
+    shop_unlocked: tuple[str, ...] = ()
     updated_at: float = 0.0
     # 上一拍的档位快照（用于跨拍判跨档；不持久化）
     tier_snapshot: dict[str, str] = field(default_factory=dict)
@@ -441,6 +451,23 @@ class ShardState:
     def begin_game(self, challenge: dict[str, Any]) -> None:
         self.game_challenge = dict(challenge)
 
+    def latch_shop_unlocks(self, item_ids: Iterable[str]) -> bool:
+        """把新达线的永久件写进锁存账；有变化才返回 True（幂等，tick 每拍都能调）。
+
+        写入前重走读侧消毒（`normalize_unlocks`）：挡住调用方把 `charm`
+        或任何未知 id 误写进锁存账——"幸运符永不进账"是行为契约，
+        不是靠每个调用点自觉。
+        """
+        merged = set(self.shop_unlocked)
+        for name in item_ids:
+            if isinstance(name, str) and name:
+                merged.add(name)
+        cleaned = normalize_unlocks(sorted(merged))
+        if cleaned == self.shop_unlocked:
+            return False
+        self.shop_unlocked = cleaned
+        return True
+
     def clear_game(self) -> None:
         self.game_challenge = {}
 
@@ -602,6 +629,7 @@ class ShardState:
             "game_earned_today": self.game_earned_today,
             "game_earned_total": self.game_earned_total,
             "game_last": dict(self.game_last),
+            "shop_unlocked": list(self.shop_unlocked),
             "updated_at": self.updated_at,
         }
 
@@ -702,6 +730,7 @@ class ShardState:
             game_earned_today=max(0, _as_int(payload.get("game_earned_today"), 0)),
             game_earned_total=max(0, _as_int(payload.get("game_earned_total"), 0)),
             game_last=dict(payload.get("game_last")) if isinstance(payload.get("game_last"), Mapping) else {},
+            shop_unlocked=normalize_unlocks(payload.get("shop_unlocked")),
             updated_at=_as_float(payload.get("updated_at"), now),
         )
 

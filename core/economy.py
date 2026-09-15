@@ -1,5 +1,8 @@
 """经济层：物品表、背包账本、口粮消耗与"口粮顾问"——纯函数，零 SDK 依赖。
 
+v0.7.0 起，"谁能上架、今天卖什么价、收藏件每天产出多少"这套货架规则在
+`core/shop.py`；本模块只拥有**物品本体**（表、效果、背包、成交可行性）。
+
 这一层回答三个问题（v0.2.0「过日子」主线）：
 
 1. **她每天要吃多少**：`meal_need_per_day` —— 由饱食衰减速率、一餐补多少、
@@ -13,8 +16,10 @@
 - **物品表是枚举单一来源**，`plugin.toml` 只暴露**行为旋钮**
   （`staple_item_id` 口粮种类、`daily_allowance` 零花钱、`carry_max` 携带上限），
   与"分档阈值不放配置"是同一套纪律（见 `core/model.py` 的 `TIER_BOUNDS`）。
-- **不含随机性**：不做抽卡/暴击。数值养成的手感来自可预期的规划，
+- **不含无头随机**：不做抽卡/暴击。数值养成的手感来自可预期的规划，
   随机奖励会让"她饿了"变成赌博，且无法写确定性测试门。
+  v0.7.0 的"每日特惠"不违反这条：它是 `(日期, 角色卡名)` 的确定性哈希——
+  当天人人可复算，测试能钉死，只是用户每天看到不同的货架（见 `core/shop.py`）。
 - **账本按"日"聚合**（`ledger_date` + 当日收支），不存逐条流水：
   面板只需要"今天挣了多少、花了多少"，逐条流水是 store 膨胀源。
 - **`Advisor` 是纯计算**：不读时钟、不看 store，输入是"她的消耗画像 + 背包快照"，
@@ -63,7 +68,13 @@ __all__ = [
 # 默认值给"正餐"，另外按物品单独覆盖（点心补得少）——这张表是单一来源，
 # `_ITEM_TABLE` 里每一项的 satiety 效果就来自它，避免"表里写 38、代码里写 30"这种漂移。
 MEAL_RESTORE = 38.0
-_MEAL_RESTORE_BY_ITEM: Mapping[str, float] = {"meat": 38.0, "fish": 38.0, "cake": 22.0}
+_MEAL_RESTORE_BY_ITEM: Mapping[str, float] = {
+    "meat": 38.0,
+    "fish": 38.0,
+    "cake": 22.0,
+    "pudding": 20.0,
+    "royal": 45.0,
+}
 # 低于这个饱食值她就想吃饭（落在 satisfied 档内，见模块 docstring）
 MEAL_THRESHOLD = 55.0
 # 没有历史数据时，面板给出的兜底每日餐数
@@ -81,7 +92,16 @@ class Item:
 
     `effects` 是"用了它，哪几项数值加多少"（0..100 的绝对增量，由调用方夹取）。
     `food` 标记它能不能当饭吃掉——只有 food 物品会被自动进食消耗。
-    `cost_sodas` 是售价（金币），`carry_max` 是携带上限（0 = 不限）。
+    `cost_sodas` 是**标价**（金币），`carry_max` 是携带上限（0 = 不限）。
+
+    v0.7.0 商店深化新增（解锁判据与折扣价在 `core/shop.py`，那张表才是货架规则）：
+
+    - `rarity`：`common` / `uncommon` / `rare` 三档纯标签。它**不改变任何数值语义**，
+      只是面板徽章与折扣文案的呈现层——稀有度不是解锁判据，解锁只看 `shop.py` 的规则。
+    - `keepsake`：收藏件。买断后**永久持有、不可被消耗**（`feed` 入口拒绝），
+      持有期间每天产出 `daily`。`carry_max=1` 保证同一件只会拥有一份。
+    - `daily`：持有型产出（`((stat, 每天量), ...)`）。键可以是 `coins`——它不是五轴
+      数值，所以产出结算里金币走独立加法，轴数值才走 `apply_item` 的夹取路径。
     """
 
     id: str
@@ -91,6 +111,9 @@ class Item:
     food: bool = False
     carry_max: int = 0
     order: int = 0
+    rarity: str = "common"
+    keepsake: bool = False
+    daily: tuple[tuple[str, float], ...] = ()
 
     def effect(self, stat: str) -> float:
         for name, delta in self.effects:
@@ -125,13 +148,35 @@ _ITEM_TABLE: tuple[Item, ...] = (
         food=True,
         order=30,
     ),
+    # v0.7.0 商店深化：四件新货。解锁线全部读**已有后端计数器**
+    # （累计班次 / 最长连签 / 好感档 / 当日幸运签），不新造任何状态
+    # （唯一例外是礼盒的"解锁不回退"，那是分片里的 `shop_unlocked` 锁存账，见 core/shop.py）。
+    Item(
+        id="pudding",
+        kind="food",
+        cost_sodas=15,
+        effects=(("satiety", _MEAL_RESTORE_BY_ITEM["pudding"]), ("mood", 15.0)),
+        food=True,
+        order=40,
+        rarity="uncommon",
+    ),
+    Item(
+        id="royal",
+        kind="food",
+        cost_sodas=18,
+        effects=(("satiety", _MEAL_RESTORE_BY_ITEM["royal"]), ("mood", 8.0), ("health", 5.0)),
+        food=True,
+        order=50,
+        rarity="rare",
+    ),
     Item(
         id="medicine",
         kind="care",
         cost_sodas=20,
         effects=(("health", 18.0), ("energy", 6.0)),
         carry_max=5,
-        order=40,
+        order=60,
+        rarity="uncommon",
     ),
     Item(
         id="toy",
@@ -139,7 +184,8 @@ _ITEM_TABLE: tuple[Item, ...] = (
         cost_sodas=14,
         effects=(("mood", 12.0), ("energy", 8.0)),
         carry_max=3,
-        order=50,
+        order=70,
+        rarity="uncommon",
     ),
     Item(
         id="gift",
@@ -147,7 +193,31 @@ _ITEM_TABLE: tuple[Item, ...] = (
         cost_sodas=30,
         effects=(("affection", 4.0), ("mood", 8.0)),
         carry_max=5,
-        order=60,
+        order=80,
+        rarity="rare",
+    ),
+    # 收藏件：不可消耗（feed 入口以 `item_keepsake` 拒绝），持有期间每天产出。
+    Item(
+        id="giftbox",
+        kind="gift",
+        cost_sodas=60,
+        effects=(),
+        carry_max=1,
+        order=90,
+        rarity="rare",
+        keepsake=True,
+        daily=(("mood", 2.0),),
+    ),
+    Item(
+        id="charm",
+        kind="charm",
+        cost_sodas=88,
+        effects=(),
+        carry_max=1,
+        order=100,
+        rarity="rare",
+        keepsake=True,
+        daily=(("coins", 3.0),),
     ),
 )
 
@@ -324,11 +394,16 @@ def recharge_plan(
     coins: int,
     daily_spent: int = 0,
     daily_limit: int = 0,
+    unit_cost: int | None = None,
 ) -> PurchasePlan:
     """买 `quantity` 个 `item_id` 能不能成。
 
     `reason` 用稳定码，供面板直接翻译：
     `unknown_item` / `invalid_quantity` / `insufficient_sodas` / `over_daily_limit` / `carry_full`。
+
+    `unit_cost` 是**调用方复核过的成交单价**（今日特惠由 `core/shop.py` 算好后传进来）。
+    缺省用标价。这里刻意不做折扣判断——折扣真相只有一处来源，
+    入口传错单价的锅在调用方，本函数仍然是纯算。
     """
     found = item(item_id)
     if found is None:
@@ -338,24 +413,25 @@ def recharge_plan(
     amount = int(quantity)
     if amount <= 0:
         return PurchasePlan(False, found.id, 0, found.cost_sodas, 0, reason="invalid_quantity")
+    price = found.cost_sodas if unit_cost is None else max(1, int(unit_cost))
     inv = inventory if isinstance(inventory, Inventory) else Inventory.from_mapping(inventory)
-    total = found.cost_sodas * amount
+    total = price * amount
     carry_left = 0
     if found.carry_max > 0:
         carry_left = max(0, found.carry_max - inv.get(found.id))
         if amount > carry_left:
             return PurchasePlan(
-                False, found.id, amount, found.cost_sodas, total, reason="carry_full", carry_left=carry_left
+                False, found.id, amount, price, total, reason="carry_full", carry_left=carry_left
             )
     if int(coins) < total:
         return PurchasePlan(
-            False, found.id, amount, found.cost_sodas, total, reason="insufficient_sodas", carry_left=carry_left
+            False, found.id, amount, price, total, reason="insufficient_sodas", carry_left=carry_left
         )
     if daily_limit > 0 and int(daily_spent) + total > int(daily_limit):
         return PurchasePlan(
-            False, found.id, amount, found.cost_sodas, total, reason="over_daily_limit", carry_left=carry_left
+            False, found.id, amount, price, total, reason="over_daily_limit", carry_left=carry_left
         )
-    return PurchasePlan(True, found.id, amount, found.cost_sodas, total, carry_left=carry_left)
+    return PurchasePlan(True, found.id, amount, price, total, carry_left=carry_left)
 
 
 # ---------------------------------------------------------------------------

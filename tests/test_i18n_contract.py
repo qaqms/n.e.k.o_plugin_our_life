@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 from our_life.core.codes import PANEL_ERROR_CODES, camel_case, is_panel_code
+from our_life.core.economy import ITEM_IDS
 from our_life.core.events import EVENT_KEYS
 from our_life.core.injection import (
     TRIGGER_ANNIVERSARY,
@@ -40,6 +41,7 @@ from our_life.core.model import (
     SATIETY_TIERS,
     STAT_NAMES,
 )
+from our_life.core.shop import RARITIES
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCALES = ("zh-CN", "en")
@@ -214,6 +216,26 @@ def test_trigger_keys_exist_for_every_trigger() -> None:
         for trigger in triggers:
             key = f"panel.trigger.{trigger}"
             assert key in messages, f"{locale} is missing {key}"
+
+
+def test_item_and_rarity_names_exist_for_every_entry() -> None:
+    """商品名与稀有度名必须两语齐全（v0.7.0 商店深化）。
+
+    面板按 `panel.item.<id>` / `panel.rarity.<稀有度>` **动态拼键**渲染货架卡，
+    拼接键不在引用面门的覆盖面内——少一个键只会显示成空白。与打工/事件族同一理由。
+    新品上架时这里必红，逼看门人同时补文案（行为单一来源仍是物品表）。
+    """
+    assert ITEM_IDS, "there must be at least one item"
+    for locale in LOCALES:
+        messages = _load(locale)
+        for item_id in ITEM_IDS:
+            key = f"panel.item.{item_id}"
+            assert key in messages, f"{locale} is missing {key}"
+            assert messages[key].strip(), f"{locale}:{key} is empty"
+        for rarity in RARITIES:
+            key = f"panel.rarity.{rarity}"
+            assert key in messages, f"{locale} is missing {key}"
+            assert messages[key].strip(), f"{locale}:{key} is empty"
 
 
 def test_job_names_exist_for_every_job() -> None:
