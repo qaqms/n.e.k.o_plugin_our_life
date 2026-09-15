@@ -58,6 +58,14 @@ PANEL_ERROR_CODES: frozenset[str] = frozenset(
         "invalid_judgment",  # 标签不在白名单里（已被收敛成 neutral，不修正）
         "judgment_capped",  # 当日修正预算用尽
         "judgment_throttled",  # 会话内递减到不足以修正
+        # 签到与补签（v0.7.0）
+        "checkin_done",  # 签到成功（成功档）
+        "checkin_disabled",  # [our_life.checkin].enabled = false
+        "already_checked_in",  # 今天已经签过了
+        "makeup_done",  # 补签成功（成功档）
+        "makeup_invalid_day",  # 日子非法、是今天、或是未来（今天该走正常签到）
+        "makeup_expired",  # 超出补签窗口
+        "makeup_exhausted",  # 本周补签额度用完
     }
 )
 

@@ -57,6 +57,7 @@ import {
 import type { InjectionRecord, JudgmentRecord, PanelProps, ShopEntry } from "./shared"
 import { AxisCards } from "./components/axis_cards"
 import { Bag } from "./components/bag"
+import { CheckinCalendar } from "./components/calendar"
 import { DayBand } from "./components/day_band"
 import { RhythmBar } from "./components/rhythm_bar"
 import { Timeline } from "./components/timeline"
@@ -68,7 +69,16 @@ const PANEL_STYLE_OVERRIDES =
   ".neko-button:disabled { cursor: not-allowed; }" +
   " .our-life-hour { display: inline-block; min-width: 13px; text-align: center; border-radius: 3px; }" +
   " .our-life-hour-sleep { background: rgba(125, 125, 160, 0.28); }" +
-  " .our-life-hour-now { outline: 1px solid currentColor; }"
+  " .our-life-hour-now { outline: 1px solid currentColor; }" +
+  " .our-life-cal-weekday { text-align: center; opacity: 0.72; }" +
+  " .our-life-cal-cell { border: 1px solid rgba(128, 128, 160, 0.35); border-radius: 6px; padding: 4px 2px; text-align: center; min-height: 30px; }" +
+  " .our-life-cal-blank { border: none; }" +
+  " .our-life-cal-checked { background: rgba(96, 180, 120, 0.22); }" +
+  " .our-life-cal-madeup { background: rgba(110, 150, 220, 0.22); }" +
+  " .our-life-cal-lucky { box-shadow: inset 0 0 0 1px rgba(230, 190, 90, 0.85); }" +
+  " .our-life-cal-missed { color: rgba(215, 120, 120, 0.92); }" +
+  " .our-life-cal-future { opacity: 0.38; }" +
+  " .our-life-cal-today { outline: 2px solid currentColor; }"
 
 // 自动轮询节奏（v0.4.3）：见 Panel 内「自动刷新」注释段的三条性能闸门论证。
 const AUTO_REFRESH_MS = 10000
@@ -97,6 +107,7 @@ export default function Panel(props: PanelProps) {
   const tiers = snapshot?.tiers ?? {}
   const inventory = snapshot?.inventory ?? {}
   const catalog = state?.shop ?? []
+  const checkinView = state?.checkin ?? {}
   const axes = state?.axes ?? {}
   const sleeping = runtime.sleeping ?? snapshot?.sleeping ?? false
 
@@ -186,6 +197,30 @@ export default function Panel(props: PanelProps) {
     if (dismissResult(result)) return
     if (result?.note === "care_applied") {
       toast.success(t("panel.msg.careApplied"))
+    }
+  }
+
+  // 签到与补签（v0.7.0）：成功文案里的金币/连续天数全部照抄后端返回值，
+  // 前端不自算任何奖励——与日历块同一条"判据在后端"的分工。
+  const doCheckin = async () => {
+    const result = await run("checkin", {})
+    if (dismissResult(result)) return
+    if (result?.note === "checkin_done") {
+      toast.success(
+        t("panel.msg.checkinDone", {
+          coins: result.coins ?? 0,
+          streak: result.streak ?? 0,
+          lucky: result.lucky ? t("panel.cal.luckyTag") : "",
+        })
+      )
+    }
+  }
+
+  const doMakeup = async (day: string) => {
+    const result = await run("makeup", { day })
+    if (dismissResult(result)) return
+    if (result?.note === "makeup_done") {
+      toast.success(t("panel.msg.makeupDone", { streak: result.streak ?? 0 }))
     }
   }
 
@@ -322,6 +357,18 @@ export default function Panel(props: PanelProps) {
       <DayBand t={t} snapshot={snapshot} dayNumber={runtime.day_number} />
       <AxisCards t={t} tiers={tiers} values={axisValues} axes={axes} sparks={sparks} />
       <RhythmBar t={t} hours={hours} sleeping={sleeping} config={config} runtime={runtime} snapshot={snapshot} />
+    </Stack>
+  )
+
+  const boardTab = (
+    <Stack gap={16}>
+      <CheckinCalendar
+        t={t}
+        checkin={checkinView}
+        masterEnabled={enabled}
+        onCheckin={doCheckin}
+        onMakeup={doMakeup}
+      />
     </Stack>
   )
 
@@ -560,6 +607,7 @@ export default function Panel(props: PanelProps) {
 
   const tabItems = [
     { id: "overview", label: t("panel.tab.overview"), content: overviewTab },
+    { id: "board", label: t("panel.tab.board"), content: boardTab },
     { id: "life", label: t("panel.tab.life"), content: lifeTab },
     { id: "her", label: t("panel.tab.her"), content: herTab },
     { id: "admin", label: t("panel.tab.admin"), content: adminTab },

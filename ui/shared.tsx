@@ -63,6 +63,27 @@ export type JudgmentRecord = {
   applied?: number
 }
 
+// 签到台账一行：[日期, 当日实得金币, 是否幸运]（来自 `core/checkin.py` 的归一化形状）。
+export type CheckinLogEntry = [string, number, boolean]
+
+// 面板日历块：`snapshot.checkin` 基础数据 + `_checkin_context_view` 补的配置读数。
+// 连续天数是后端从集合现算的显示值；前端不参与任何判据（与作息条同一分工）。
+export type CheckinView = {
+  today?: string
+  checked_today?: boolean
+  streak?: number
+  best?: number
+  log?: CheckinLogEntry[]
+  makeups?: string[]
+  enabled?: boolean
+  feature_enabled?: boolean
+  next_reward?: number
+  makeup_cost?: number
+  makeup_left?: number
+  makeup_window_days?: number
+  makeup_week_limit?: number
+}
+
 export type FeedbackView = {
   enabled?: boolean
   daily_add_points?: number
@@ -129,6 +150,7 @@ export type State = {
   shop?: ShopEntry[]
   state?: ShardSnapshot | null
   runtime?: RuntimeView
+  checkin?: CheckinView
   axes?: Record<string, AxisView>
   recent_injections?: InjectionRecord[]
   recent_events?: EventRecord[]

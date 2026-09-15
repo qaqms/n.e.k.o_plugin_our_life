@@ -122,6 +122,24 @@ new_day_bonus = 4.0
 streak_reward = 0.7
 max_turns_per_session = 20
 
+[our_life.checkin]
+# 每日签到与日历（v0.7.0）：手动签到领金币，连续签到加成有封顶，
+# 偶尔"运气好"多给一截（服务端掷骰）；漏签可花金币补签——补签不给钱、只续链。
+# 连续天数从日历集合现算（判据在 core/checkin.py），这里只暴露数额与概率旋钮。
+enabled = true
+# 基础金币；每多连续一天 +streak_bonus_per_day，加成天数封顶 streak_cap_days。
+base_coins = 8
+streak_bonus_per_day = 2
+streak_cap_days = 10
+# 幸运事：命中概率与额外加成比例区间（结果四舍五入到整数金币）。
+luck_chance = 0.15
+luck_min_bonus = 0.5
+luck_max_bonus = 2.0
+# 补签：单价、可补窗口（天）、每 ISO 周额度。
+makeup_cost = 12
+makeup_window_days = 7
+makeup_week_limit = 1
+
 [our_life.growth]
 # 每次用户发言：心情 +2.5 / 健康 +0.8 / 好感 +0.35。
 # 同一会话内第 n 次发言按 1/(1+n*session_diminish) 递减，避免"连发刷数值"。

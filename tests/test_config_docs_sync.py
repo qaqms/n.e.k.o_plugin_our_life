@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from our_life.core.configuration import (
+    CheckinSettings,
     DecaySettings,
     EconomySettings,
     EventSettings,
@@ -34,6 +35,7 @@ SUB_SECTIONS = (
     ("decay", DecaySettings),
     ("rhythm", RhythmSettings),
     ("economy", EconomySettings),
+    ("checkin", CheckinSettings),
     ("growth", GrowthSettings),
     ("feedback", FeedbackSettings),
     ("events", EventSettings),

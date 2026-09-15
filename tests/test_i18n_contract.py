@@ -52,6 +52,8 @@ SUCCESS_NOTES = (
     "shop_purchased",
     "care_applied",
     "coin_updated",
+    "checkin_done",
+    "makeup_done",
     "focus_set",
     "focus_cleared",
 )

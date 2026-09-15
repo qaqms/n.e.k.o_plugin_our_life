@@ -20,6 +20,7 @@ v0.2.0「过日子」主线：数值从三轴扩到五轴（+饱食 / 精力）�
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Any
 
@@ -53,6 +54,7 @@ from .core import (
     apply_decay,
     apply_item,
     apply_judgment,
+    apply_luck,
     apply_meal,
     apply_neglect,
     apply_streak_bonus,
@@ -66,20 +68,26 @@ from .core import (
     effects_for,
     eventful_tier_transitions,
     is_crisis,
+    is_valid_day,
     item,
     judge,
     local_day,
+    makeup_reason,
     meal_need_per_day,
     meal_plan,
     meal_restore,
     minutes_until_next_boundary,
     neglect_entitlement_days,
+    next_checkin_streak,
     overlap_hours,
     pick_event,
     recharge_plan,
     resolve_rhythm,
+    reward_coins,
+    roll_luck,
     satiety_per_day,
     streak_milestone_bonus,
+    week_key,
 )
 from .services import BehaviorSampler, Injector, ShardState, StateStore, ToolWatch, day_number_for
 
@@ -91,6 +99,9 @@ _SESSION_IDLE_SEC = 1800.0  # 超过这么久没说话，算新会话（同会�
 # 单次折算的上限：机器睡了三天再打开，不该让她"饿三天"式的暴跌
 # （冷落另有按天的惩罚通道；这里只防数值在开机的瞬间崩掉）
 _MAX_ELAPSED_HOURS = 48.0
+# 签到的"运气"掷骰用模块级随机源（v0.7.0）：掷骰发生在**后端**，客户端只收到结果，
+# 没有作弊面；单测对本实例 seed 即可复现幸运档。
+_CHECKIN_RNG = random.Random()
 
 __all__ = ["OurLifePlugin"]
 
@@ -539,6 +550,41 @@ class OurLifePlugin(NekoPluginBase):
             "feedback": self._feedback_view(state),
         }
 
+    def _checkin_context_view(self, state: ShardState, *, now: float) -> dict[str, Any]:
+        """面板日历块：snapshot 的 `checkin` 基础数据 + 配置读数 + 下一次签到预览。
+
+        `next_reward` 用与入口同一套纯函数（`next_checkin_streak` + `reward_coins`）
+        现算，**不含幸运期望值**——面板报"今天签到可得 N"而不是"平均 N×1.x"，
+        不拿随机性去做展示。
+        """
+        checkin_settings = self._settings.checkin
+        base = dict(state.snapshot_for_panel(now=now).get("checkin") or {})
+        today = str(base.get("today") or "")
+        checked = state.checkin_set()
+        if base.get("checked_today"):
+            next_reward = 0
+        else:
+            next_reward = reward_coins(
+                streak=next_checkin_streak(checked, today) if today else 1,
+                base_coins=checkin_settings.base_coins,
+                streak_bonus_per_day=checkin_settings.streak_bonus_per_day,
+                streak_cap_days=checkin_settings.streak_cap_days,
+            )
+        base.update(
+            {
+                "enabled": bool(checkin_settings.enabled and self._settings.enabled),
+                "feature_enabled": bool(checkin_settings.enabled),
+                "next_reward": next_reward,
+                "makeup_cost": max(0, int(checkin_settings.makeup_cost)),
+                "makeup_window_days": max(0, int(checkin_settings.makeup_window_days)),
+                "makeup_left": state.makeup_left(
+                    week_limit=checkin_settings.makeup_week_limit, today=today
+                ),
+                "makeup_week_limit": max(0, int(checkin_settings.makeup_week_limit)),
+            }
+        )
+        return base
+
     def _feedback_view(self, state: ShardState) -> dict[str, Any]:
         """反馈闭环的面板读数。
 
@@ -861,6 +907,151 @@ class OurLifePlugin(NekoPluginBase):
         )
 
     @ui.action(
+        id="checkin",
+        label=tr("actions.checkin.label", default="Check in"),
+        tone="primary",
+        refresh_context=True,
+    )
+    @plugin_entry(
+        id="checkin",
+        name=tr("entries.checkin.name", default="今日签到"),
+        description=tr(
+            "entries.checkin.description",
+            default="在今天的日历上签到领金币：连续越久领越多（有封顶），偶尔运气好会多给一截",
+        ),
+        input_schema={"type": "object", "properties": {}},
+        llm_result_fields=["note", "coins", "streak", "lucky"],
+    )
+    async def checkin_entry(self, **kwargs: Any):
+        """今天签到并领金币。
+
+        掷骰在**后端**（模块级 `_CHECKIN_RNG`），客户端只收到结果；连续天数从日历
+        集合现算（判据在 `core/checkin.py` 纪律 1），所以补签接链不需要任何特判。
+        金币直接入账：它不碰五项数值，没有"先折算再修正"的时序问题，
+        不需要像反馈闭环那样走 `_pending_judgments` 中转。
+        """
+        lanlan, error = await self._resolve_lanlan(kwargs)
+        if error is not None:
+            return error
+        settings = self._settings
+        if not settings.enabled:
+            return Err(SdkError("not_enabled"))
+        if not settings.checkin.enabled:
+            return Err(SdkError("checkin_disabled"))
+        now = time.time()
+        today = local_day(now)
+        if not today:
+            return Err(SdkError("invalid_value"))
+        state = await self._load_for_read(lanlan)
+        if state.has_checkin(today):
+            return Err(SdkError("already_checked_in"))
+        streak = next_checkin_streak(state.checkin_set(), today)
+        coins = reward_coins(
+            streak=streak,
+            base_coins=settings.checkin.base_coins,
+            streak_bonus_per_day=settings.checkin.streak_bonus_per_day,
+            streak_cap_days=settings.checkin.streak_cap_days,
+        )
+        factor = roll_luck(
+            _CHECKIN_RNG,
+            luck_chance=settings.checkin.luck_chance,
+            luck_min_bonus=settings.checkin.luck_min_bonus,
+            luck_max_bonus=settings.checkin.luck_max_bonus,
+        )
+        coins, lucky = apply_luck(coins, factor)
+        state.note_checkin(day=today, coins=coins, lucky=lucky, today=today)
+        state.sodas += coins
+        await self._store.save(state, now=now)
+        return Ok(
+            {
+                "note": "checkin_done" if self._store.store_available else "store_unavailable",
+                "store_available": self._store.store_available,
+                "coins": coins,
+                "lucky": lucky,
+                "streak": state.checkin_streak,
+                "best": state.checkin_best,
+                "sodas": state.sodas,
+            }
+        )
+
+    @ui.action(
+        id="makeup",
+        label=tr("actions.makeup.label", default="Make up check-in"),
+        tone="warning",
+        refresh_context=True,
+    )
+    @plugin_entry(
+        id="makeup",
+        name=tr("entries.makeup.name", default="补签漏掉的日子"),
+        description=tr(
+            "entries.makeup.description",
+            default="花金币补一次漏签：补签不给钱、只把断掉的连续记录续上；每周围有额度、只能补窗口内的日子",
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "day": {
+                    "type": "string",
+                    "description": tr("fields.day", default="补哪一天（YYYY-MM-DD）"),
+                }
+            },
+            "required": ["day"],
+        },
+        llm_result_fields=["note", "day", "streak"],
+    )
+    async def makeup_entry(self, day: str = "", **kwargs: Any):
+        """补签：花金币续链，**不给钱**。
+
+        补签刻意不是"再领一次奖励"的通道：它只修复连续记录，否则"补签窗口 7 天"
+        会变成一周 7 次无互动的白拿。花费也不计进 `daily_spent`——那是商店的
+        消费上限，补签不是购物。
+        """
+        lanlan, error = await self._resolve_lanlan(kwargs)
+        if error is not None:
+            return error
+        settings = self._settings
+        if not settings.enabled:
+            return Err(SdkError("not_enabled"))
+        if not settings.checkin.enabled:
+            return Err(SdkError("checkin_disabled"))
+        now = time.time()
+        today = local_day(now)
+        if not today or not is_valid_day(day):
+            return Err(SdkError("makeup_invalid_day"))
+        state = await self._load_for_read(lanlan)
+        state.begin_makeup_week(week=week_key(today))
+        reason = makeup_reason(
+            day=day,
+            today=today,
+            checked=state.checkin_set(),
+            used_this_week=state.makeup_used,
+            week_limit=settings.checkin.makeup_week_limit,
+            window_days=settings.checkin.makeup_window_days,
+        )
+        if reason != "ok":
+            return Err(SdkError(reason))
+        cost = max(0, int(settings.checkin.makeup_cost))
+        if state.sodas < cost:
+            return Err(SdkError("insufficient_sodas"))
+        state.sodas -= cost
+        state.makeup_used += 1
+        state.note_makeup(day=day, today=today)
+        await self._store.save(state, now=now)
+        return Ok(
+            {
+                "note": "makeup_done" if self._store.store_available else "store_unavailable",
+                "store_available": self._store.store_available,
+                "day": day,
+                "cost": cost,
+                "streak": state.checkin_streak,
+                "makeup_left": state.makeup_left(
+                    week_limit=settings.checkin.makeup_week_limit, today=today
+                ),
+                "sodas": state.sodas,
+            }
+        )
+
+    @ui.action(
         id="reset",
         label=tr("actions.reset.label", default="Reset"),
         tone="danger",
@@ -1026,6 +1217,7 @@ class OurLifePlugin(NekoPluginBase):
             return payload
         state = await self._touch_shard(lanlan, now=now)
         payload["state"] = state.snapshot_for_panel(now=now)
+        payload["checkin"] = self._checkin_context_view(state, now=now)
         payload["runtime"] = await self._runtime_view(state, now=now)
         payload["axes"] = _axis_view(state, now=now)
         payload["recent_injections"] = [dict(item) for item in state.inject_history[-8:]]

@@ -11,6 +11,9 @@
 
 **schema 版本与向后兼容**（v0.4.0 起）：
 
+- `_SCHEMA_VERSION = 5`：新增**签到台账**（`checkin_log`：`(日期, 金币, 是否幸运)`；
+  `checkin_makeups`：补签过的日子；`checkin_streak/checkin_best`：从集合重算的显示缓存；
+  `makeup_week/makeup_used`：补签周计数）。与吃饭账同一纪律：只存日期与数字，不存任何正文。
 - `_SCHEMA_VERSION = 4`：新增**阶段性事件台账**（`event_history`：最近若干条
   `{key, stat, value, width, at}`）。与判断台账同一条隐私纪律——只存事件名与数值快照，
   不存任何对话正文。
@@ -31,7 +34,18 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping
 
-from ..core.behavior import BehaviorSummary
+from ..core.behavior import BehaviorSummary, local_day
+from ..core.checkin import (
+    checked_days as _checked_days_from,
+)
+from ..core.checkin import (
+    current_streak as _current_streak,
+)
+from ..core.checkin import (
+    normalize_checkin_log,
+    normalize_makeups,
+    week_key,
+)
 from ..core.economy import Inventory, observed_meals_per_day
 from ..core.model import STAT_NAMES, Stats
 from ..core.rhythm import day_number_of
@@ -49,7 +63,6 @@ __all__ = [
     "shard_key",
     "FOCUS_KEY",
 ]
-
 KEY_PREFIX = "ourlife@"
 
 # 面板焦点分片（v0.4.2）：多角色卡时面板唯一的"看哪张卡"信号。
@@ -65,7 +78,7 @@ JUDGMENT_HISTORY_MAX = 12
 # 十二条同时是冷却窗口的"记忆长度"：默认最紧的冷却是 6h，一天最多 4 条，
 # 所以 12 条永远覆盖得下一整天的冷却判定（见 core/events.pick_event 的说明）。
 EVENT_HISTORY_MAX = 12
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 def shard_key(lanlan: str) -> str:
     return f"{KEY_PREFIX}{lanlan}"
@@ -138,6 +151,18 @@ class ShardState:
     # 她最近经历过什么（只存 {key, stat, value, width, at}，**不含任何正文**）。
     # 它同时承担两件事：面板的"经历"列表，与 `core/events.pick_event` 的冷却判据。
     event_history: tuple[dict[str, Any], ...] = ()
+    # --- 签到台账（v0.7.0，schema 5）---
+    # 正常签到：(日期, 当日实际领到的金币, 是否幸运)，按日期升序、限长。
+    checkin_log: tuple[tuple[str, int, bool], ...] = ()
+    # 补签过的日子（不给钱、只续链；日历上单独一种颜色）。
+    checkin_makeups: tuple[str, ...] = ()
+    # 连续/最长天数是**从集合重算的缓存**（判据在 core/checkin.current_streak，
+    # 补签接链靠的就是这条"读数不是计数器"的纪律，见其模块 docstring 纪律 1）。
+    checkin_streak: int = 0
+    checkin_best: int = 0
+    # 补签周计数：ISO 周键（`2026-W37`）+ 本周已用次数（跨周读时归零，不需要常驻任务）。
+    makeup_week: str = ""
+    makeup_used: int = 0
     updated_at: float = 0.0
     # 上一拍的档位快照（用于跨拍判跨档；不持久化）
     tier_snapshot: dict[str, str] = field(default_factory=dict)
@@ -282,6 +307,54 @@ class ShardState:
             return ()
         return tuple(dict(item) for item in self.event_history[-limit:][::-1])
 
+    # ------------------------------------------------------------------
+    # 签到台账（v0.7.0）
+    # ------------------------------------------------------------------
+
+    def checkin_set(self) -> frozenset[str]:
+        """日历上"打过勾"的日子全集（正常签到 ∪ 补签）。"""
+        return _checked_days_from(self.checkin_log, self.checkin_makeups)
+
+    def has_checkin(self, day: str) -> bool:
+        return day in self.checkin_set()
+
+    def refresh_checkin_streak(self, *, today: str) -> int:
+        """从集合重算连续天数并回写缓存（`checkin_streak` / `checkin_best`）。
+
+        签到/补签后都要调一次；缓存永远只是"显示值"，判据永远走集合。
+        """
+        streak = _current_streak(self.checkin_set(), today) if today else 0
+        self.checkin_streak = streak
+        if streak > self.checkin_best:
+            self.checkin_best = streak
+        return streak
+
+    def note_checkin(self, *, day: str, coins: int, lucky: bool, today: str) -> None:
+        """记一次正常签到（升序去重、限长）并重刷连续缓存。"""
+        merged = {entry[0]: (int(entry[1]), bool(entry[2])) for entry in self.checkin_log}
+        merged[day] = (max(0, int(coins)), bool(lucky))
+        self.checkin_log = normalize_checkin_log(
+            [[key, value[0], value[1]] for key, value in merged.items()]
+        )
+        self.refresh_checkin_streak(today=today)
+
+    def note_makeup(self, *, day: str, today: str) -> None:
+        """记一次补签（不给钱、只续链）并重刷连续缓存。"""
+        days = set(self.checkin_makeups) | {day}
+        self.checkin_makeups = normalize_makeups(sorted(days))
+        self.refresh_checkin_streak(today=today)
+
+    def begin_makeup_week(self, *, week: str) -> None:
+        """周计数对齐到 `week`：不是同一周就归零（与 `account_date` 的日账同一手法）。"""
+        if self.makeup_week != week:
+            self.makeup_week = week
+            self.makeup_used = 0
+
+    def makeup_left(self, *, week_limit: int, today: str) -> int:
+        """本周还能补几次（面板读数用，不会为负）。"""
+        used = self.makeup_used if self.makeup_week == week_key(today) else 0
+        return max(0, int(week_limit) - used)
+
     def last_injected_stats(self) -> Stats | None:
         for entry in reversed(self.inject_history):
             raw = entry.get("stats")
@@ -324,6 +397,17 @@ class ShardState:
                 "count_today": self.judgment_count_today,
                 "last_judgment_at": self.last_judgment_at,
                 "history": [dict(item) for item in self.judgment_history[-6:]],
+            },
+            "checkin": {
+                "today": local_day(now),
+                "checked_today": local_day(now) in self.checkin_set(),
+                # 显示用现算值：两天没签时，写入缓存的 streak 会比"截至昨天"的真值高。
+                "streak": _current_streak(self.checkin_set(), local_day(now)),
+                "best": self.checkin_best,
+                # 全量日志：日历要能翻回上个月且不能把"签过但被截掉"的日子画成漏签。
+                # 上限 CHECKIN_LOG_KEEP=120 条三元组，JSON 体积在几 KB 量级，不构成负担。
+                "log": [[day, coins, lucky] for day, coins, lucky in self.checkin_log],
+                "makeups": list(self.checkin_makeups),
             },
             "events": {
                 "history": [dict(item) for item in self.recent_events(limit=6)],
@@ -374,6 +458,12 @@ class ShardState:
             "last_judgment_at": self.last_judgment_at,
             "judgment_history": [dict(item) for item in self.judgment_history],
             "event_history": [dict(item) for item in self.event_history],
+            "checkin_log": [[day, coins, int(lucky)] for day, coins, lucky in self.checkin_log],
+            "checkin_makeups": list(self.checkin_makeups),
+            "checkin_streak": self.checkin_streak,
+            "checkin_best": self.checkin_best,
+            "makeup_week": self.makeup_week,
+            "makeup_used": self.makeup_used,
             "updated_at": self.updated_at,
         }
 
@@ -455,6 +545,12 @@ class ShardState:
             event_history=tuple(
                 dict(item) for item in _as_list(payload.get("event_history")) if isinstance(item, Mapping)
             )[-EVENT_HISTORY_MAX:],
+            checkin_log=normalize_checkin_log(payload.get("checkin_log")),
+            checkin_makeups=normalize_makeups(payload.get("checkin_makeups")),
+            checkin_streak=max(0, _as_int(payload.get("checkin_streak"), 0)),
+            checkin_best=max(0, _as_int(payload.get("checkin_best"), 0)),
+            makeup_week=_as_str(payload.get("makeup_week")),
+            makeup_used=max(0, _as_int(payload.get("makeup_used"), 0)),
             updated_at=_as_float(payload.get("updated_at"), now),
         )
 

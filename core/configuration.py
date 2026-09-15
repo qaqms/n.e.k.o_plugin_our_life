@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from .coerce import as_bool, as_float, as_float_list, as_int, as_int_list, as_str, section
 
 __all__ = [
+    "CheckinSettings",
     "DecaySettings",
     "EconomySettings",
     "EventSettings",
@@ -158,6 +159,55 @@ class EconomySettings:
             max_turns_per_session=max(
                 1, as_int(raw.get("max_turns_per_session") if raw else None, base.max_turns_per_session)
             ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CheckinSettings:
+    """每日签到与补签（v0.7.0）。
+
+    只暴露"数额与概率"旋钮；"连续天数怎么算"（集合后缀、含今天的奖励口径）
+    是判据，固定在 `core/checkin.py`，不进配置——与分档阈值同一条纪律。
+    """
+
+    enabled: bool = True
+    # 今天签到的基础金币；连续加成 = 每多连续一天 +streak_bonus_per_day（封顶见 cap）。
+    base_coins: int = 8
+    streak_bonus_per_day: int = 2
+    # 加成封顶天数：第 11 天起不再增长（默认 8 + 2×10 = 28/天）。
+    streak_cap_days: int = 10
+    # 幸运事:命中概率与额外加成比例区间（结果四舍五入到整数金币）。
+    luck_chance: float = 0.15
+    luck_min_bonus: float = 0.5
+    luck_max_bonus: float = 2.0
+    # 补签：价格、可补窗口（天）、每 ISO 周额度。
+    makeup_cost: int = 12
+    makeup_window_days: int = 7
+    makeup_week_limit: int = 1
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None) -> "CheckinSettings":
+        base = cls()
+        table = raw if isinstance(raw, Mapping) else {}
+        chance = as_float(table.get("luck_chance"), base.luck_chance)
+        low = _non_negative(as_float(table.get("luck_min_bonus"), base.luck_min_bonus))
+        high = _non_negative(as_float(table.get("luck_max_bonus"), base.luck_max_bonus))
+        if high < low:
+            # 区间反写是手改坏的典型形状：退化为固定 min，而不是让掷骰子抛异常。
+            high = low
+        return cls(
+            enabled=as_bool(table.get("enabled"), base.enabled),
+            base_coins=max(0, as_int(table.get("base_coins"), base.base_coins)),
+            streak_bonus_per_day=max(
+                0, as_int(table.get("streak_bonus_per_day"), base.streak_bonus_per_day)
+            ),
+            streak_cap_days=max(0, as_int(table.get("streak_cap_days"), base.streak_cap_days)),
+            luck_chance=max(0.0, min(1.0, chance)),
+            luck_min_bonus=low,
+            luck_max_bonus=high,
+            makeup_cost=max(0, as_int(table.get("makeup_cost"), base.makeup_cost)),
+            makeup_window_days=max(0, as_int(table.get("makeup_window_days"), base.makeup_window_days)),
+            makeup_week_limit=max(0, as_int(table.get("makeup_week_limit"), base.makeup_week_limit)),
         )
 
 
@@ -386,6 +436,7 @@ class OurLifeSettings:
     decay: DecaySettings = field(default_factory=DecaySettings)
     rhythm: RhythmSettings = field(default_factory=RhythmSettings)
     economy: EconomySettings = field(default_factory=EconomySettings)
+    checkin: CheckinSettings = field(default_factory=CheckinSettings)
     growth: GrowthSettings = field(default_factory=GrowthSettings)
     feedback: FeedbackSettings = field(default_factory=FeedbackSettings)
     events: EventSettings = field(default_factory=EventSettings)
@@ -403,6 +454,7 @@ class OurLifeSettings:
             decay=DecaySettings.from_mapping(section(config, "our_life", "decay")),
             rhythm=RhythmSettings.from_mapping(section(config, "our_life", "rhythm")),
             economy=EconomySettings.from_mapping(section(config, "our_life", "economy")),
+            checkin=CheckinSettings.from_mapping(section(config, "our_life", "checkin")),
             growth=GrowthSettings.from_mapping(section(config, "our_life", "growth")),
             feedback=FeedbackSettings.from_mapping(section(config, "our_life", "feedback")),
             events=EventSettings.from_mapping(section(config, "our_life", "events")),
