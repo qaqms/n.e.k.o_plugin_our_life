@@ -299,12 +299,30 @@ def test_arith_expired_voids_and_refunds_quota(make_plugin: Any, run_async: Any)
 
 
 def test_hielo_flow_bets_to_settlement(make_plugin: Any, run_async: Any) -> None:
+    """猜大小从签发到结算的入口链（v0.7.0）。
+
+    **必须在进门前钉种子**：`_GAME_RNG` 是**模块级共享**随机源，不重播种子的话，
+    本门拿到的牌序取决于"同一次 pytest 进程里它前面跑了几个走 `game_start` 的门"。
+    不钉种子的真实后果：牌是 `randint(1, 13)` **有放回**抽的，抽到同点是常态——
+    而同点按输，于是下面那句"两战全胜"会在**约 15% 的跑次里凭空红**
+    （本轮真实踩到：`release_gate` 的 pytest 门隔一次红一次）。
+
+    与 `test_jobs.py` 的"入口路径碰真实钟点判据的门必须钉窗"是同一条纪律：
+    **入口路径碰后端掷骰的门必须钉种子**。种子 3 抽出的 `[4, 10, 9]` 一升一降，
+    两个方向的注都踩过；`_make_hielo` 那些单测本来就已自带种子，不受影响。
+    """
+    import our_life
+
     plugin, _host = make_plugin()
     plugin._settings = _settings(hielo_rounds=2)
+    our_life._GAME_RNG.seed(3)
     started = run_async(plugin.game_start_entry(kind="hielo", **CTX))
     assert started.is_ok()
     challenge = plugin._store.cached["灵"].game_challenge
     ranks = list(challenge["ranks"])
+    # 钉了种子不等于安全：谁改了抽牌方式（或 Python 的 randint 行为变了），
+    # 这个种子可能就不再无同点——**响亮地报出来**，而不是留一句 `won is False` 让人猜。
+    assert all(a != b for a, b in zip(ranks, ranks[1:])), f"pinned seed drew a tie: {ranks}"
     bets = ["higher" if ranks[i + 1] > ranks[i] else "lower" for i in range(2)]
     first = run_async(plugin.game_hielo_bet_entry(bet=bets[0], **CTX))
     assert first.is_ok() and first.value["note"] == "hielo_round"
