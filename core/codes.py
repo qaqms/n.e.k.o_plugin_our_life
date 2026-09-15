@@ -76,6 +76,16 @@ PANEL_ERROR_CODES: frozenset[str] = frozenset(
         "not_working",  # 想收工但她根本没在上班
         "job_daily_limit",  # 今日班次额度用完
         "job_needs_rest",  # 身体条件不满足开工门槛
+        # 玩家打工小游戏（v0.7.0）
+        "game_started",  # 挑战签发成功（成功档）
+        "game_done",  # 一局判分发钱成功（成功档）
+        "games_disabled",  # [our_life.games].enabled = false
+        "game_invalid_kind",  # 未知游戏
+        "game_in_progress",  # 已有未结算的挑战（不许靠重开刷新题目）
+        "game_no_challenge",  # 没有进行中的挑战 / 挑战已被消费（防重放）
+        "game_expired",  # 交卷晚于时限+宽限
+        "game_daily_limit",  # 日额度（每种与合计共用此码）
+        "game_answer_invalid",  # 交卷形状非法（非列表/项非整数/押注不合法）
         "job_sleep_window",  # 班次会压到睡眠窗（含现在正在睡）
     }
 )

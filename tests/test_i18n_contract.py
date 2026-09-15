@@ -55,6 +55,8 @@ SUCCESS_NOTES = (
     "care_applied",
     "coin_updated",
     "checkin_done",
+    "game_started",
+    "game_done",
     "job_started",
     "job_returned",
     "makeup_done",

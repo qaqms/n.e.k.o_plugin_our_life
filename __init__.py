@@ -39,6 +39,7 @@ from plugin.sdk.plugin import (
 )
 
 from .core import (
+    GAME_KINDS,
     ITEM_ORDER,
     JOB_ORDER,
     JUDGMENT_LABELS,
@@ -49,6 +50,7 @@ from .core import (
     advance_streak,
     advise,
     anniversary_of,
+    answer_invalid_reason,
     apply_anniversary,
     apply_coupling,
     apply_day_greet,
@@ -61,10 +63,14 @@ from .core import (
     apply_streak_bonus,
     apply_turn_gain,
     axis_details,
+    build_challenge,
     build_text,
     bump_meal_day,
+    challenge_public_view,
     clamp_value,
+    consume_challenge,
     crisis_axes,
+    daily_block_reason,
     daily_income,
     effects_for,
     eventful_tier_transitions,
@@ -93,6 +99,8 @@ from .core import (
     shift_hits_sleep_window,
     start_block_reason,
     streak_milestone_bonus,
+    submit_arith,
+    submit_hielo,
     wage_preview,
     week_key,
 )
@@ -110,6 +118,9 @@ _MAX_ELAPSED_HOURS = 48.0
 # 签到的"运气"掷骰用模块级随机源（v0.7.0）：掷骰发生在**后端**，客户端只收到结果，
 # 没有作弊面；单测对本实例 seed 即可复现幸运档。
 _CHECKIN_RNG = random.Random()
+# 玩家打工的出题/抽牌随机源（v0.7.0）：与签到同一手法——真值只在后端，
+# 单测对本实例 seed 即可复现题目与牌序。
+_GAME_RNG = random.Random()
 
 __all__ = ["OurLifePlugin"]
 
@@ -321,6 +332,8 @@ class OurLifePlugin(NekoPluginBase):
             streak=streak,
         )
         state.reset_job_day(today=today)
+        # 玩家打工的日额度账与班次账同一条日界线；入口也会各自 reset（幂等）。
+        state.reset_game_day(today=today)
 
         # 4.5) 打工到点结算（在吃饭之前：下班回来又累又饿，饿了就该吃）。
         # 班次是持久化的真实时间：重启/关机后 tick 下一拍看到 `now >= job_end_at`
@@ -664,6 +677,35 @@ class OurLifePlugin(NekoPluginBase):
                     week_limit=checkin_settings.makeup_week_limit, today=today
                 ),
                 "makeup_week_limit": max(0, int(checkin_settings.makeup_week_limit)),
+            }
+        )
+        return base
+
+    def _games_context_view(self, state: ShardState, *, now: float) -> dict[str, Any]:
+        """小游戏面板块：快照的 `games`（只含公开视图）+ 额度旋钮。
+
+        真值（题答/牌序）已在 `snapshot_for_panel` 那一侧被 `challenge_public_view`
+        切掉；这里再补的只是"每天几局、每局多少钱"的展示数据。
+        """
+        games = self._settings.games
+        base = dict(state.snapshot_for_panel(now=now).get("games") or {})
+        base.update(
+            {
+                "enabled": bool(games.enabled and self._settings.enabled),
+                "feature_enabled": bool(games.enabled),
+                "per_game_daily_limit": int(games.per_game_daily_limit),
+                "total_daily_limit": int(games.total_daily_limit),
+                "arith": {
+                    "rounds": int(games.arith_rounds),
+                    "time_limit_sec": int(games.arith_time_limit_sec),
+                    "coin_per_correct": int(games.arith_coin_per_correct),
+                    "perfect_bonus": int(games.arith_perfect_bonus),
+                },
+                "hielo": {
+                    "rounds": int(games.hielo_rounds),
+                    "win_coins": int(games.hielo_win_coins),
+                    "loss_coins": int(games.hielo_loss_coins),
+                },
             }
         )
         return base
@@ -1265,6 +1307,260 @@ class OurLifePlugin(NekoPluginBase):
             }
         )
 
+    # ------------------------------------------------------------------
+    # 玩家打工（v0.7.0）：服务器权威小游戏
+    # ------------------------------------------------------------------
+
+    @ui.action(
+        id="game_start",
+        label=tr("actions.gameStart.label", default="Start a game"),
+        tone="primary",
+        refresh_context=True,
+    )
+    @plugin_entry(
+        id="game_start",
+        name=tr("entries.gameStart.name", default="开一局小游戏"),
+        description=tr(
+            "entries.gameStart.description",
+            default="签发一份服务器持有的挑战（心算 arith / 猜大小 hielo），返回的题目不含答案",
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": list(GAME_KINDS),
+                    "description": tr("fields.gameKind", default="玩哪个"),
+                }
+            },
+            "required": ["kind"],
+        },
+        llm_result_fields=["note", "kind"],
+    )
+    async def game_start_entry(self, kind: str = "", **kwargs: Any):
+        """开一局：签发挑战。**真值存进分片**，返回值只含公开视图（题面/当前牌）。"""
+        lanlan, error = await self._resolve_lanlan(kwargs)
+        if error is not None:
+            return error
+        settings = self._settings
+        if not settings.enabled:
+            return Err(SdkError("not_enabled"))
+        if not settings.games.enabled:
+            return Err(SdkError("games_disabled"))
+        if kind not in GAME_KINDS:
+            return Err(SdkError("game_invalid_kind"))
+        now = time.time()
+        today = local_day(now)
+        if not today:
+            return Err(SdkError("invalid_value"))
+        state = await self._load_for_read(lanlan)
+        state.reset_game_day(today=today)
+        if state.active_challenge() is not None:
+            # 不许靠重开局"换一套题"——旧挑战要么先打完，要么先被判分作废。
+            return Err(SdkError("game_in_progress"))
+        blocked = daily_block_reason(
+            kind=kind,
+            counts=state.game_counts,
+            per_game_limit=settings.games.per_game_daily_limit,
+            total_limit=settings.games.total_daily_limit,
+        )
+        if blocked != "ok":
+            return Err(SdkError(blocked))
+        games = settings.games
+        challenge = build_challenge(
+            kind,
+            now=now,
+            rng=_GAME_RNG,
+            arith_rounds=games.arith_rounds,
+            arith_time_limit_sec=float(games.arith_time_limit_sec),
+            hielo_rounds=games.hielo_rounds,
+        )
+        if challenge is None:
+            return Err(SdkError("game_invalid_kind"))
+        state.begin_game(challenge)
+        await self._store.save(state, now=now)
+        return Ok(
+            {
+                "note": "game_started" if self._store.store_available else "store_unavailable",
+                "store_available": self._store.store_available,
+                "kind": kind,
+                "challenge": challenge_public_view(challenge),
+            }
+        )
+
+    @ui.action(
+        id="game_arith_submit",
+        label=tr("actions.gameSubmit.label", default="Submit answers"),
+        tone="success",
+        refresh_context=True,
+    )
+    @plugin_entry(
+        id="game_arith_submit",
+        name=tr("entries.gameArithSubmit.name", default="提交心算答卷"),
+        description=tr(
+            "entries.gameArithSubmit.description",
+            default="按时序提交答案数组，后端对照签发时存下的真值判分并发钱（一次性，过期作废）",
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "answers": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": tr("fields.gameAnswers", default="按题目顺序的答案"),
+                }
+            },
+            "required": ["answers"],
+        },
+        llm_result_fields=["note", "correct", "rounds", "coins"],
+    )
+    async def game_arith_submit_entry(self, answers: Any = None, **kwargs: Any):
+        """心算交卷：判分 → 发钱 → 计数 → consume，一步完成。
+
+        过期的一局**作废但不计次数**：没发钱的局不占额度，玩家可重开。
+        """
+        lanlan, error = await self._resolve_lanlan(kwargs)
+        if error is not None:
+            return error
+        settings = self._settings
+        if not settings.enabled:
+            return Err(SdkError("not_enabled"))
+        if not settings.games.enabled:
+            return Err(SdkError("games_disabled"))
+        reason = answer_invalid_reason(answers)
+        if reason:
+            return Err(SdkError(reason))
+        now = time.time()
+        state = await self._load_for_read(lanlan)
+        state.reset_game_day(today=local_day(now))
+        challenge = state.active_challenge()
+        if challenge is None or challenge.get("kind") != "arith":
+            return Err(SdkError("game_no_challenge"))
+        games = settings.games
+        outcome = submit_arith(
+            challenge,
+            answers,
+            now=now,
+            coin_per_correct=games.arith_coin_per_correct,
+            perfect_bonus=games.arith_perfect_bonus,
+        )
+        if outcome is None:
+            consume_challenge(challenge)
+            state.clear_game()
+            await self._store.save(state, now=now)
+            return Err(SdkError("game_expired"))
+        consume_challenge(challenge)
+        state.clear_game()
+        state.sodas += outcome.coins
+        state.note_game_outcome(
+            kind=outcome.kind,
+            coins=outcome.coins,
+            correct=outcome.correct,
+            rounds=outcome.rounds,
+            perfect=outcome.perfect,
+            at=now,
+        )
+        await self._store.save(state, now=now)
+        return Ok(
+            {
+                "note": "game_done" if self._store.store_available else "store_unavailable",
+                "store_available": self._store.store_available,
+                **outcome.as_dict(),
+                "sodas": state.sodas,
+            }
+        )
+
+    @ui.action(
+        id="game_hielo_bet",
+        label=tr("actions.gameBet.label", default="Place bet"),
+        tone="success",
+        refresh_context=True,
+    )
+    @plugin_entry(
+        id="game_hielo_bet",
+        name=tr("entries.gameHieloBet.name", default="猜大小押注"),
+        description=tr(
+            "entries.gameHieloBet.description",
+            default="对当前牌押 higher/lower；下一张由后端在签发时抽好的牌序里翻出，同点按输，打完自动结算",
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "bet": {
+                    "type": "string",
+                    "enum": ["higher", "lower"],
+                    "description": tr("fields.gameBet", default="押下一张更大还是更小"),
+                }
+            },
+            "required": ["bet"],
+        },
+        llm_result_fields=["note", "won", "round", "wins"],
+    )
+    async def game_hielo_bet_entry(self, bet: str = "", **kwargs: Any):
+        """猜大小推进一轮：翻后端自己存的下一张牌。最后一轮当场结算发钱。
+
+        牌序在 `game_start` 时就抽好了——这里不重新随机，所以同一局里无论
+        怎么拖延、重发请求，下一张都不变；重放已消费的局撞 `game_no_challenge`。
+        """
+        lanlan, error = await self._resolve_lanlan(kwargs)
+        if error is not None:
+            return error
+        settings = self._settings
+        if not settings.enabled:
+            return Err(SdkError("not_enabled"))
+        if not settings.games.enabled:
+            return Err(SdkError("games_disabled"))
+        if bet not in ("higher", "lower"):
+            return Err(SdkError("game_answer_invalid"))
+        now = time.time()
+        state = await self._load_for_read(lanlan)
+        state.reset_game_day(today=local_day(now))
+        challenge = state.active_challenge()
+        if challenge is None or challenge.get("kind") != "hielo":
+            return Err(SdkError("game_no_challenge"))
+        games = settings.games
+        outcome, challenge, reason = submit_hielo(
+            challenge,
+            bet,
+            win_coins=games.hielo_win_coins,
+            loss_coins=games.hielo_loss_coins,
+        )
+        if reason:
+            return Err(SdkError(reason))
+        ranks = challenge["ranks"]
+        index = int(challenge["index"])
+        current = int(ranks[index])
+        previous = int(ranks[index - 1])
+        state.begin_game(challenge)
+        won = current > previous if bet == "higher" else current < previous
+        result: dict[str, Any] = {
+            "note": "game_done" if outcome is not None else "hielo_round",
+            "store_available": self._store.store_available,
+            "bet": bet,
+            "won": won,
+            "previous": previous,
+            "current": current,
+            "round": index,
+            "rounds": int(challenge.get("rounds") or 0),
+            "wins": int(challenge.get("wins") or 0),
+            "losses": int(challenge.get("losses") or 0),
+        }
+        if outcome is not None:
+            state.clear_game()
+            state.sodas += outcome.coins
+            state.note_game_outcome(
+                kind=outcome.kind,
+                coins=outcome.coins,
+                correct=outcome.correct,
+                rounds=outcome.rounds,
+                perfect=outcome.perfect,
+                at=now,
+            )
+            result.update(outcome.as_dict())
+            result["sodas"] = state.sodas
+        await self._store.save(state, now=now)
+        return Ok(result)
+
     @ui.action(
         id="reset",
         label=tr("actions.reset.label", default="Reset"),
@@ -1433,6 +1729,7 @@ class OurLifePlugin(NekoPluginBase):
         payload["state"] = state.snapshot_for_panel(now=now)
         payload["checkin"] = self._checkin_context_view(state, now=now)
         payload["job"] = self._job_context_view(state, now=now)
+        payload["games"] = self._games_context_view(state, now=now)
         payload["runtime"] = await self._runtime_view(state, now=now)
         payload["axes"] = _axis_view(state, now=now)
         payload["recent_injections"] = [dict(item) for item in state.inject_history[-8:]]

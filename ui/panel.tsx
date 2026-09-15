@@ -60,6 +60,7 @@ import { Bag } from "./components/bag"
 import { CheckinCalendar } from "./components/calendar"
 import { DayBand } from "./components/day_band"
 import { JobBoard } from "./components/job_board"
+import { Minigames } from "./components/minigame"
 import { RhythmBar } from "./components/rhythm_bar"
 import { Timeline } from "./components/timeline"
 
@@ -110,6 +111,7 @@ export default function Panel(props: PanelProps) {
   const catalog = state?.shop ?? []
   const checkinView = state?.checkin ?? {}
   const jobView = state?.job ?? {}
+  const gamesView = state?.games ?? {}
   const axes = state?.axes ?? {}
   const sleeping = runtime.sleeping ?? snapshot?.sleeping ?? false
 
@@ -241,6 +243,44 @@ export default function Panel(props: PanelProps) {
     if (dismissResult(result)) return
     if (result?.note === "job_returned") {
       toast.success(t("panel.msg.jobReturned", { pay: result.pay ?? 0 }))
+    }
+  }
+
+  // 小游戏（v0.7.0）：面板不自行判分，只把后端返回的结果摆出来；
+  // `hielo_round` 是逐轮中间态（不是错误也不是终局），不弹 toast，靠 context 刷新重画。
+  const startGame = async (kind: string) => {
+    const result = await run("game_start", { kind })
+    if (dismissResult(result)) return
+    if (result?.note === "game_started") {
+      toast.success(t("panel.msg.gameStarted"))
+    }
+  }
+
+  const submitArith = async (answers: number[]) => {
+    const result = await run("game_arith_submit", { answers })
+    if (dismissResult(result)) return
+    if (result?.note === "game_done") {
+      toast.success(
+        t("panel.game.result", {
+          correct: result.correct ?? 0,
+          rounds: result.rounds ?? 0,
+          coins: result.coins ?? 0,
+        })
+      )
+    }
+  }
+
+  const betHielo = async (bet: string) => {
+    const result = await run("game_hielo_bet", { bet })
+    if (dismissResult(result)) return
+    if (result?.note === "game_done") {
+      toast.success(
+        t("panel.game.result", {
+          correct: result.correct ?? 0,
+          rounds: result.rounds ?? 0,
+          coins: result.coins ?? 0,
+        })
+      )
     }
   }
 
@@ -390,6 +430,14 @@ export default function Panel(props: PanelProps) {
         onMakeup={doMakeup}
       />
       <JobBoard t={t} job={jobView} masterEnabled={enabled} onStart={startShift} onReturn={callBackHome} />
+      <Minigames
+        t={t}
+        games={gamesView}
+        masterEnabled={enabled}
+        onStart={startGame}
+        onSubmitArith={submitArith}
+        onBet={betHielo}
+      />
     </Stack>
   )
 

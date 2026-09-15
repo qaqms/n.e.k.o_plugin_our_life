@@ -23,6 +23,7 @@ __all__ = [
     "EconomySettings",
     "EventSettings",
     "FeedbackSettings",
+    "GameSettings",
     "GrowthSettings",
     "InjectSettings",
     "JobSettings",
@@ -240,6 +241,57 @@ class JobSettings:
             ),
             early_leave_ratio=max(
                 0.0, min(1.0, as_float(table.get("early_leave_ratio"), base.early_leave_ratio))
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GameSettings:
+    """玩家打工小游戏（v0.7.0）：额度与单价。
+
+    题目难度、牌序规则（1..13、同点按输）是判据，固定在 `core/games.py`；
+    这里只暴露"一局多少钱、一天几局"这类经济旋钮。两个日限额是**后端计数**，
+    前端拿不到发钱通道——面板写多少都不算，真判据在 `game_counts`。
+    """
+
+    enabled: bool = True
+    arith_rounds: int = 10
+    arith_time_limit_sec: int = 60
+    arith_coin_per_correct: int = 2
+    arith_perfect_bonus: int = 5
+    hielo_rounds: int = 6
+    hielo_win_coins: int = 6
+    hielo_loss_coins: int = 1
+    per_game_daily_limit: int = 3
+    total_daily_limit: int = 6
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None) -> "GameSettings":
+        base = cls()
+        table = raw if isinstance(raw, Mapping) else {}
+        return cls(
+            enabled=as_bool(table.get("enabled"), base.enabled),
+            arith_rounds=min(20, max(3, as_int(table.get("arith_rounds"), base.arith_rounds))),
+            arith_time_limit_sec=min(
+                600, max(15, as_int(table.get("arith_time_limit_sec"), base.arith_time_limit_sec))
+            ),
+            arith_coin_per_correct=min(
+                10,
+                max(0, as_int(table.get("arith_coin_per_correct"), base.arith_coin_per_correct)),
+            ),
+            arith_perfect_bonus=min(
+                20, max(0, as_int(table.get("arith_perfect_bonus"), base.arith_perfect_bonus))
+            ),
+            hielo_rounds=min(12, max(2, as_int(table.get("hielo_rounds"), base.hielo_rounds))),
+            hielo_win_coins=min(20, max(0, as_int(table.get("hielo_win_coins"), base.hielo_win_coins))),
+            hielo_loss_coins=min(
+                5, max(0, as_int(table.get("hielo_loss_coins"), base.hielo_loss_coins))
+            ),
+            per_game_daily_limit=min(
+                10, max(0, as_int(table.get("per_game_daily_limit"), base.per_game_daily_limit))
+            ),
+            total_daily_limit=min(
+                20, max(0, as_int(table.get("total_daily_limit"), base.total_daily_limit))
             ),
         )
 
@@ -471,6 +523,7 @@ class OurLifeSettings:
     economy: EconomySettings = field(default_factory=EconomySettings)
     checkin: CheckinSettings = field(default_factory=CheckinSettings)
     job: JobSettings = field(default_factory=JobSettings)
+    games: GameSettings = field(default_factory=GameSettings)
     growth: GrowthSettings = field(default_factory=GrowthSettings)
     feedback: FeedbackSettings = field(default_factory=FeedbackSettings)
     events: EventSettings = field(default_factory=EventSettings)
@@ -490,6 +543,7 @@ class OurLifeSettings:
             economy=EconomySettings.from_mapping(section(config, "our_life", "economy")),
             checkin=CheckinSettings.from_mapping(section(config, "our_life", "checkin")),
             job=JobSettings.from_mapping(section(config, "our_life", "job")),
+            games=GameSettings.from_mapping(section(config, "our_life", "games")),
             growth=GrowthSettings.from_mapping(section(config, "our_life", "growth")),
             feedback=FeedbackSettings.from_mapping(section(config, "our_life", "feedback")),
             events=EventSettings.from_mapping(section(config, "our_life", "events")),

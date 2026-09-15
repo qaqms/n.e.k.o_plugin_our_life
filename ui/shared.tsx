@@ -148,6 +148,35 @@ export type JobView = {
   catalog?: JobCatalogEntry[]
 }
 
+// 小游戏（v0.7.0）：`active` 就是后端的**公开视图**（arith 只含题面、hielo 只含当前牌）——
+// 题答与牌序从不出现在这里，重开面板也能续局（单一真相在 context）。
+export type GameActiveView = {
+  kind?: string
+  issued_at?: number
+  deadline_at?: number | null
+  questions?: string[]
+  current?: number | null
+  revealed?: number[]
+  round?: number
+  rounds?: number
+  wins?: number
+  losses?: number
+}
+
+export type GamesView = {
+  active?: GameActiveView | null
+  counts?: Record<string, number>
+  earned_today?: number
+  earned_total?: number
+  last?: Record<string, any>
+  enabled?: boolean
+  feature_enabled?: boolean
+  per_game_daily_limit?: number
+  total_daily_limit?: number
+  arith?: Record<string, number>
+  hielo?: Record<string, number>
+}
+
 // 她经历过什么（v0.4.0 阶段性事件）。
 // 只带事件名 / 轴 / 时刻与数值快照——台账里本来就没有任何对话正文（见 core/events.py）。
 export type EventRecord = {
@@ -180,6 +209,7 @@ export type State = {
   runtime?: RuntimeView
   checkin?: CheckinView
   job?: JobView
+  games?: GamesView
   axes?: Record<string, AxisView>
   recent_injections?: InjectionRecord[]
   recent_events?: EventRecord[]

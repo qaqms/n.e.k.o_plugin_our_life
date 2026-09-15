@@ -49,6 +49,7 @@ from ..core.checkin import (
     week_key,
 )
 from ..core.economy import Inventory, observed_meals_per_day
+from ..core.games import challenge_public_view, normalize_challenge, normalize_game_counts
 from ..core.model import STAT_NAMES, Stats
 from ..core.rhythm import day_number_of
 
@@ -177,6 +178,17 @@ class ShardState:
     # 累计读数（商店解锁判据 + 面板"她挣过的钱"）。
     job_shifts_total: int = 0
     job_earned_total: int = 0
+    # --- 玩家打工台账（v0.7.0，schema 5）---
+    # 当前挑战：含**全部真值**（题答/牌序），因此它**永不直接进面板快照**——
+    # 对外一律过 `challenge_public_view` 切掉答案（见 `snapshot_for_panel`）。
+    game_challenge: dict[str, Any] = field(default_factory=dict)
+    # 日额度账：`game_day` 跨天自重置（与签到/判断同一手法）；counts 按 kind + "total"。
+    game_day: str = ""
+    game_counts: dict[str, int] = field(default_factory=dict)
+    game_earned_today: int = 0
+    game_earned_total: int = 0
+    # 最近一局结果（面板展示用）：{kind, at, coins, correct, rounds, perfect}。
+    game_last: dict[str, Any] = field(default_factory=dict)
     updated_at: float = 0.0
     # 上一拍的档位快照（用于跨拍判跨档；不持久化）
     tier_snapshot: dict[str, str] = field(default_factory=dict)
@@ -407,6 +419,49 @@ class ShardState:
         self.job_shifts_total += 1
         self.job_earned_total += max(0, int(pay))
 
+    # ------------------------------------------------------------------
+    # 玩家打工台账（v0.7.0）
+    # ------------------------------------------------------------------
+
+    def reset_game_day(self, *, today: str) -> bool:
+        """跨天重置日额度与今日收入（幂等；入口自己保证算的是今天的账）。"""
+        if self.game_day == today:
+            return False
+        self.game_day = today
+        self.game_counts = {}
+        self.game_earned_today = 0
+        return True
+
+    def active_challenge(self) -> dict[str, Any] | None:
+        """当前可推进的挑战；空/已消费返回 None。"""
+        if not self.game_challenge or self.game_challenge.get("consumed"):
+            return None
+        return self.game_challenge
+
+    def begin_game(self, challenge: dict[str, Any]) -> None:
+        self.game_challenge = dict(challenge)
+
+    def clear_game(self) -> None:
+        self.game_challenge = {}
+
+    def note_game_outcome(self, *, kind: str, coins: int, correct: int, rounds: int, perfect: bool, at: float) -> None:
+        """记一局完成：次数账只在**发钱这一步**动（中途重开不计数）。"""
+        counts = dict(self.game_counts)
+        counts[kind] = counts.get(kind, 0) + 1
+        counts["total"] = counts.get("total", 0) + 1
+        self.game_counts = counts
+        gained = max(0, int(coins))
+        self.game_earned_today += gained
+        self.game_earned_total += gained
+        self.game_last = {
+            "kind": kind,
+            "at": float(at),
+            "coins": gained,
+            "correct": int(correct),
+            "rounds": int(rounds),
+            "perfect": bool(perfect),
+        }
+
     def last_injected_stats(self) -> Stats | None:
         for entry in reversed(self.inject_history):
             raw = entry.get("stats")
@@ -470,6 +525,15 @@ class ShardState:
                 "shifts_total": self.job_shifts_total,
                 "earned_total": self.job_earned_total,
             },
+            "games": {
+                # 只外发公开视图：题答与牌序**永不**进面板（`props.state` 在浏览器里，
+                # 原始 challenge 进来等于把答案递给可伪造一切参数的那一侧）。
+                "active": challenge_public_view(self.game_challenge) if self.active_challenge() else None,
+                "counts": dict(self.game_counts),
+                "earned_today": self.game_earned_today,
+                "earned_total": self.game_earned_total,
+                "last": dict(self.game_last),
+            },
             "events": {
                 "history": [dict(item) for item in self.recent_events(limit=6)],
                 "total": len(self.event_history),
@@ -532,6 +596,12 @@ class ShardState:
             "job_count_today": self.job_count_today,
             "job_shifts_total": self.job_shifts_total,
             "job_earned_total": self.job_earned_total,
+            "game_challenge": dict(self.game_challenge),
+            "game_day": self.game_day,
+            "game_counts": dict(self.game_counts),
+            "game_earned_today": self.game_earned_today,
+            "game_earned_total": self.game_earned_total,
+            "game_last": dict(self.game_last),
             "updated_at": self.updated_at,
         }
 
@@ -626,6 +696,12 @@ class ShardState:
             job_count_today=max(0, _as_int(payload.get("job_count_today"), 0)),
             job_shifts_total=max(0, _as_int(payload.get("job_shifts_total"), 0)),
             job_earned_total=max(0, _as_int(payload.get("job_earned_total"), 0)),
+            game_challenge=normalize_challenge(payload.get("game_challenge")) or {},
+            game_day=_as_str(payload.get("game_day")),
+            game_counts=normalize_game_counts(payload.get("game_counts")),
+            game_earned_today=max(0, _as_int(payload.get("game_earned_today"), 0)),
+            game_earned_total=max(0, _as_int(payload.get("game_earned_total"), 0)),
+            game_last=dict(payload.get("game_last")) if isinstance(payload.get("game_last"), Mapping) else {},
             updated_at=_as_float(payload.get("updated_at"), now),
         )
 

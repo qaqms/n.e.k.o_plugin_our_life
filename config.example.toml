@@ -93,6 +93,24 @@ max_shifts_per_day = 2
 # 早退折价：提前喊她回来，工钱按"已完成时长比例 × 这个折扣"结算。
 early_leave_ratio = 0.6
 
+
+[our_life.games]
+# 玩家打工小游戏（v0.7.0）：心算冲刺与猜大小。题目、牌序、判分全在后端，
+# 前端只拿到"该看的部分"；每日额度是后端计数，面板写多少都不算。
+enabled = true
+# 心算：题数 / 时限（秒）/ 每题金币 / 全对奖励。
+arith_rounds = 10
+arith_time_limit_sec = 60
+arith_coin_per_correct = 2
+arith_perfect_bonus = 5
+# 猜大小：轮数 / 赢一轮 / 输一轮（正期望但微小——它是打工不是赌场）。
+hielo_rounds = 6
+hielo_win_coins = 6
+hielo_loss_coins = 1
+# 日额度：每种游戏每天局数上限 + 全部游戏合计上限。
+per_game_daily_limit = 3
+total_daily_limit = 6
+
 [our_life.growth]
 # 每次用户发言的成长步长；同一会话内递减（session_diminish 控制递减强度）。
 turn_mood_gain = 2.5
