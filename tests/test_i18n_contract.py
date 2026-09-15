@@ -291,7 +291,7 @@ def test_state_voice_keys_exist_for_every_stat_and_tier() -> None:
     面板按 `panel.stateVoice.<轴>.<档>` **动态拼键**输出她说的话——键名由
     `core/state_note.voice_keys` 选，前端只负责 `t(key)`。拼接键不在引用面门
     （`t("字面量")` 正则）的射程里，所以少一句不会让任何门变红，只会在面板上
-    显示成一个空引号——那比不显示更界。双向钉：拼错的档名（如 `satiety.huger`）
+    显示成一个空引号——那比不显示更糟。双向钉：拼错的档名（如 `satiety.huger`）
     永远取不到，作为孤儿抓出来。
     """
     assert set(_VOICE_FAMILIES) == set(STAT_NAMES)

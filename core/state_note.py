@@ -315,8 +315,8 @@ def _mind_view(judgment: Mapping[str, Any] | None) -> dict[str, Any]:
 
     只取 `judgment_history` 的**最后一条**（她的最近一次评价）+ 今天说过几次。
     `label` 必须是 `JUDGMENT_LABELS` 里的已登记键才转发——面板拼
-    `panel.judgment.<label>`，上了标签却没上文案会显示成空白徐章（那比不显示更界）。
-    历史条目本身不可信（旧分片 / 手动改过 store 的兵底），所以非 Mapping 直接跳过。
+    `panel.judgment.<label>`，上了标签却没上文案会显示成空白徽章（那比不显示更糟）。
+    历史条目本身不可信（旧分片 / 手动改过 store 的兜底），所以非 Mapping 直接跳过。
     `applied` 原样带出（可正可负），
     因为"她的高兴值多少分"是这一页少数几个诚实的数字之一。
     """
