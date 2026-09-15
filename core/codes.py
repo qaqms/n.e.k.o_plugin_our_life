@@ -66,6 +66,17 @@ PANEL_ERROR_CODES: frozenset[str] = frozenset(
         "makeup_invalid_day",  # 日子非法、是今天、或是未来（今天该走正常签到）
         "makeup_expired",  # 超出补签窗口
         "makeup_exhausted",  # 本周补签额度用完
+        # 猫娘打工（v0.7.0）
+        "job_started",  # 开工成功（成功档）
+        "job_returned",  # 收工/早退结算成功（成功档）
+        "job_settled",  # tick 到点自动结算成功（日志/面板标注用）
+        "jobs_disabled",  # [our_life.job].enabled = false
+        "invalid_job",  # 未知工作 id
+        "already_working",  # 她正在班上，不能再开第二份工
+        "not_working",  # 想收工但她根本没在上班
+        "job_daily_limit",  # 今日班次额度用完
+        "job_needs_rest",  # 身体条件不满足开工门槛
+        "job_sleep_window",  # 班次会压到睡眠窗（含现在正在睡）
     }
 )
 

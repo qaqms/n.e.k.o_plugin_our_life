@@ -40,6 +40,7 @@ from plugin.sdk.plugin import (
 
 from .core import (
     ITEM_ORDER,
+    JOB_ORDER,
     JUDGMENT_LABELS,
     STAT_NAMES,
     TRIGGER_COMPANY,
@@ -70,6 +71,8 @@ from .core import (
     is_crisis,
     is_valid_day,
     item,
+    job_catalog,
+    job_narration,
     judge,
     local_day,
     makeup_reason,
@@ -86,9 +89,14 @@ from .core import (
     reward_coins,
     roll_luck,
     satiety_per_day,
+    settle_shift,
+    shift_hits_sleep_window,
+    start_block_reason,
     streak_milestone_bonus,
+    wage_preview,
     week_key,
 )
+from .core.jobs import apply_shift_costs
 from .services import BehaviorSampler, Injector, ShardState, StateStore, ToolWatch, day_number_for
 
 # 真实节奏由配置 `[our_life].tick_seconds` 决定；装饰器的 seconds 必须是**字面量正整数**
@@ -304,7 +312,7 @@ class OurLifePlugin(NekoPluginBase):
             stats = apply_neglect(stats, delta_days=delta_days, neglect=settings.neglect)
             state.neglect_days_applied = entitlement
 
-        # 4) 金币与日账（跨天重置消费上限、发放零花钱、结算日薪）
+        # 4) 金币与日账（跨天重置消费上限、发放零花钱、结算日薪）+ 打工日账重置
         self._settle_account(
             state,
             today=today,
@@ -312,6 +320,16 @@ class OurLifePlugin(NekoPluginBase):
             is_new_day=is_new_day,
             streak=streak,
         )
+        state.reset_job_day(today=today)
+
+        # 4.5) 打工到点结算（在吃饭之前：下班回来又累又饿，饿了就该吃）。
+        # 班次是持久化的真实时间：重启/关机后 tick 下一拍看到 `now >= job_end_at`
+        # 照样补结，与惰性衰减同一手法，没有常驻计时器。
+        job_outcome = None
+        if self._settings.job.enabled and state.working and now >= state.job_end_at:
+            settled = self._settle_job(state, stats=stats, now=now)
+            if settled is not None:
+                job_outcome, stats = settled
 
         # 5) 吃饭：她自己去背包里吃（主人囤得够不够，就在这一步见分晓）
         stats = self._auto_meal(state, stats=stats, now=now, day=today, rhythm=rhythm)
@@ -404,6 +422,22 @@ class OurLifePlugin(NekoPluginBase):
             anniversary_seen=not anniversary_fresh,
             judgment_label=judgment_label,
         )
+        if job_outcome is not None:
+            # 下班叙事：独立通道（与阶段事件同理：同拍都该说话，单链会互顶）。
+            # 记账已在 `_settle_job` 完成，这里只决定"要不要把这句话送进上下文"。
+            job_plan = self._injector.plan_for_job(
+                state=state,
+                settings=settings,
+                now=now,
+                job_line=job_narration(job_outcome.job_id, pay=job_outcome.pay, early=job_outcome.early),
+                rhythm=rhythm,
+            )
+            if job_plan is not None:
+                submitted = await self._injector.emit(job_plan)
+                if submitted:
+                    state.note_injection(
+                        at=now, trigger=job_plan.trigger, summary=_summarize_tiers(state), stats=state.stats
+                    )
         if plan is not None:
             submitted = await self._injector.emit(plan)
             if submitted:
@@ -524,6 +558,37 @@ class OurLifePlugin(NekoPluginBase):
         )
         return stats
 
+    def _settle_job(self, state: ShardState, *, stats: Stats, now: float):
+        """到点结算一个班次：发钱、扣额外损耗、清班。返回 `(outcome, 新数值)`。
+
+        坏分片（未知 job id / 时间字段被手改坏）也要把班次清掉——鬼班次比丢一笔
+        工钱更糟：它会永久挡住下一次开工（`already_working`）。
+        """
+        outcome = settle_shift(
+            job_id=state.job_id,
+            now=now,
+            started_at=state.job_start_at,
+            end_at=state.job_end_at,
+            stats=stats,
+            early_leave_ratio=self._settings.job.early_leave_ratio,
+        )
+        job_id = state.job_id
+        state.end_shift()
+        if outcome is None:
+            self.logger.warning("our_life: dropped a malformed shift (job_id=%s)", job_id or "-")
+            return None
+        new_stats = apply_shift_costs(stats, outcome)
+        state.sodas += outcome.pay
+        state.note_shift_settled(pay=outcome.pay)
+        self.logger.info(
+            "our_life: shift settled (job=%s pay=%d fraction=%.2f early=%s)",
+            outcome.job_id,
+            outcome.pay,
+            outcome.fraction,
+            outcome.early,
+        )
+        return outcome, new_stats
+
     def _anniversary(self, state: ShardState, *, today: str):
         """今天的纪念日（相处天数命中锚点）；没有相遇日期时为 None。"""
         if not state.first_day or not today:
@@ -549,6 +614,24 @@ class OurLifePlugin(NekoPluginBase):
             "anniversary": _anniversary_dict(self._anniversary(state, today=rhythm.date_iso)),
             "feedback": self._feedback_view(state),
         }
+
+    def _job_context_view(self, state: ShardState, *, now: float) -> dict[str, Any]:
+        """打工面板块：snapshot 的 `job` 读数 + 目录 + 配置旋钮。
+
+        目录是静态真相（`core/jobs.py` 单一来源），计数是当次读数——两层在这里合流。
+        """
+        job_settings = self._settings.job
+        base = dict(state.snapshot_for_panel(now=now).get("job") or {})
+        base.update(
+            {
+                "enabled": bool(job_settings.enabled and self._settings.enabled),
+                "feature_enabled": bool(job_settings.enabled),
+                "max_per_day": int(job_settings.max_shifts_per_day),
+                "early_leave_ratio": round(job_settings.early_leave_ratio, 2),
+                "catalog": job_catalog(),
+            }
+        )
+        return base
 
     def _checkin_context_view(self, state: ShardState, *, now: float) -> dict[str, Any]:
         """面板日历块：snapshot 的 `checkin` 基础数据 + 配置读数 + 下一次签到预览。
@@ -1052,6 +1135,137 @@ class OurLifePlugin(NekoPluginBase):
         )
 
     @ui.action(
+        id="job_start",
+        label=tr("actions.jobStart.label", default="Start shift"),
+        tone="primary",
+        refresh_context=True,
+    )
+    @plugin_entry(
+        id="job_start",
+        name=tr("entries.jobStart.name", default="让她去打工"),
+        description=tr(
+            "entries.jobStart.description",
+            default="排一个真实工时的班次：到点自动结算工钱，代价是额外的精力/饱食/心情损耗；睡眠窗与身体门槛不满足时开不了工",
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "job": {
+                    "type": "string",
+                    "enum": list(JOB_ORDER),
+                    "description": tr("fields.job", default="去哪份工"),
+                }
+            },
+            "required": ["job"],
+        },
+        llm_result_fields=["note", "job", "pay_low", "pay_high", "ends_at"],
+    )
+    async def job_start_entry(self, job: str = "", **kwargs: Any):
+        """开工：把班次写进分片，结算交给 tick 的时间判据（不挂任何常驻计时器）。"""
+        lanlan, error = await self._resolve_lanlan(kwargs)
+        if error is not None:
+            return error
+        settings = self._settings
+        if not settings.enabled:
+            return Err(SdkError("not_enabled"))
+        if not settings.job.enabled:
+            return Err(SdkError("jobs_disabled"))
+        now = time.time()
+        today = local_day(now)
+        if not today:
+            return Err(SdkError("invalid_value"))
+        found = _job_of(job)
+        if found is None:
+            return Err(SdkError("invalid_job"))
+        state = await self._load_for_read(lanlan)
+        state.reset_job_day(today=today)
+        rhythm = self._rhythm(now=now)
+        reason = start_block_reason(
+            job_id=found.id,
+            stats=state.stats,
+            active_job_id=state.job_id,
+            shifts_today=state.job_count_today,
+            max_per_day=settings.job.max_shifts_per_day,
+            sleeping=rhythm.sleeping,
+            hits_sleep_window=shift_hits_sleep_window(
+                start=_local_datetime(now),
+                hours=found.hours,
+                sleep_start_hour=settings.rhythm.sleep_start_hour,
+                sleep_end_hour=settings.rhythm.sleep_end_hour,
+            ),
+        )
+        if reason != "ok":
+            return Err(SdkError(reason))
+        state.begin_shift(job_id=found.id, now=now, hours=found.hours)
+        await self._store.save(state, now=now)
+        preview = wage_preview(found.id)
+        return Ok(
+            {
+                "note": "job_started" if self._store.store_available else "store_unavailable",
+                "store_available": self._store.store_available,
+                "job": found.id,
+                "hours": found.hours,
+                "pay_low": preview[0] if preview else 0,
+                "pay_high": preview[1] if preview else 0,
+                "ends_at": state.job_end_at,
+                "today_left": max(0, settings.job.max_shifts_per_day - state.job_count_today),
+            }
+        )
+
+    @ui.action(
+        id="job_return",
+        label=tr("actions.jobReturn.label", default="Call her back"),
+        tone="warning",
+        refresh_context=True,
+    )
+    @plugin_entry(
+        id="job_return",
+        name=tr("entries.jobReturn.name", default="喊她提前收工"),
+        description=tr(
+            "entries.jobReturn.description",
+            default="把正在上班的她喊回家：工钱按已完成时长比例再打早退折，额外损耗也按时长比例扣",
+        ),
+        input_schema={"type": "object", "properties": {}},
+        llm_result_fields=["note", "job", "pay", "fraction"],
+    )
+    async def job_return_entry(self, **kwargs: Any):
+        """早退结算：不等下班点，把已千的部分结清。
+
+        与 tick 的到点结算共用同一个 `settle_shift`：fraction < 1 时它自动乘
+        早退折、按比例扣损耗——早退只是"把同一个函数提前调了"，没有第二套算法。
+        """
+        lanlan, error = await self._resolve_lanlan(kwargs)
+        if error is not None:
+            return error
+        settings = self._settings
+        if not settings.enabled:
+            return Err(SdkError("not_enabled"))
+        if not settings.job.enabled:
+            return Err(SdkError("jobs_disabled"))
+        now = time.time()
+        state = await self._load_for_read(lanlan)
+        if not state.working:
+            return Err(SdkError("not_working"))
+        state.reset_job_day(today=local_day(now))
+        settled = self._settle_job(state, stats=state.stats, now=now)
+        if settled is None:
+            return Err(SdkError("invalid_job"))
+        outcome, state.stats = settled
+        await self._store.save(state, now=now)
+        return Ok(
+            {
+                "note": "job_returned" if self._store.store_available else "store_unavailable",
+                "store_available": self._store.store_available,
+                "job": outcome.job_id,
+                "pay": outcome.pay,
+                "fraction": round(outcome.fraction, 3),
+                "early": outcome.early,
+                "sodas": state.sodas,
+                "tiers": state.stats.tier_map(),
+            }
+        )
+
+    @ui.action(
         id="reset",
         label=tr("actions.reset.label", default="Reset"),
         tone="danger",
@@ -1218,6 +1432,7 @@ class OurLifePlugin(NekoPluginBase):
         state = await self._touch_shard(lanlan, now=now)
         payload["state"] = state.snapshot_for_panel(now=now)
         payload["checkin"] = self._checkin_context_view(state, now=now)
+        payload["job"] = self._job_context_view(state, now=now)
         payload["runtime"] = await self._runtime_view(state, now=now)
         payload["axes"] = _axis_view(state, now=now)
         payload["recent_injections"] = [dict(item) for item in state.inject_history[-8:]]
@@ -1519,6 +1734,13 @@ def _item_of(item_id: str) -> Any:
     from .core.economy import item as catalog_item
 
     return catalog_item(item_id)
+
+
+def _job_of(job_id: str) -> Any:
+    """按 id 取工作（入口参数名 `job` 会遮蔽 `core.jobs.job`，与 `_item_of` 同一手法）。"""
+    from .core.jobs import job as catalog_job
+
+    return catalog_job(job_id)
 
 
 def _summarize_tiers(state: ShardState) -> str:

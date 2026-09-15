@@ -48,6 +48,7 @@ from ..core.injection import (
     TRIGGER_DAILY_GREET,
     TRIGGER_HUNGRY,
     TRIGGER_INTERVAL,
+    TRIGGER_JOB,
     TRIGGER_JUDGMENT,
     TRIGGER_STAGED_EVENT,
     TRIGGER_TIER_CHANGE,
@@ -319,6 +320,47 @@ class Injector:
             day_number=state.day_number,
         )
         return InjectionPlan(text=text, trigger=TRIGGER_COMPANY, ai_behavior="respond", lanlan=state.lanlan)
+
+    def plan_for_job(
+        self,
+        *,
+        state: ShardState,
+        settings: OurLifeSettings,
+        now: float,
+        job_line: str,
+        rhythm: "DailyRhythm | None" = None,
+    ) -> InjectionPlan | None:
+        """打工下班叙事（v0.7.0）：与 `plan_for_event` 并列的独立通道。
+
+        为什么不走 `plan_for_tick` 的优先级链：下班是一条**已经发生过的事实**，
+        和"她此刻状态如何"同拍抵达时，两者都想说——单链会互相顶掉（阶段事件
+        同样理由，见其 docstring）。只共享 `max_per_hour` 总闸门。
+
+        永远 `read`：钱已经挣回来了，不是危机通知，不该打断主人；
+        但她要知道自己今天上过班、带回了多少（金币是"今天的 factual 事件"，
+        不在"不给模型看数字"的五轴禁令里）。
+
+        睡眠：结算照常发生（在调用侧，钱照发、损耗照扣），这里只决定要不要
+        把这句话送进上下文——她累到直接睡着时不该还在"播报下班"。
+        """
+        if not settings.enabled or not settings.job.enabled:
+            return None
+        inject = settings.inject
+        if len(_prune_window(state.inject_timestamps, now)) >= inject.max_per_hour:
+            return None
+        if inject.quiet_during_sleep and rhythm is not None and rhythm.sleeping:
+            return None
+        text = build_text(
+            stats=state.stats,
+            trigger=TRIGGER_JOB,
+            streak_days=state.streak_days,
+            gap_hours=None if state.last_touch_at is None else max(0.0, (now - state.last_touch_at) / _HOUR),
+            max_chars=inject.max_chars,
+            rhythm=rhythm,
+            day_number=state.day_number,
+            job_line=job_line,
+        )
+        return InjectionPlan(text=text, trigger=TRIGGER_JOB, ai_behavior="read", lanlan=state.lanlan)
 
     def _quieted(
         self,

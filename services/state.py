@@ -13,7 +13,9 @@
 
 - `_SCHEMA_VERSION = 5`：新增**签到台账**（`checkin_log`：`(日期, 金币, 是否幸运)`；
   `checkin_makeups`：补签过的日子；`checkin_streak/checkin_best`：从集合重算的显示缓存；
-  `makeup_week/makeup_used`：补签周计数）。与吃饭账同一纪律：只存日期与数字，不存任何正文。
+  `makeup_week/makeup_used`：补签周计数）与**打工台账**（`job_id/job_start_at/job_end_at`
+  当前班次；`job_day/job_count_today` 日账；`job_shifts_total/job_earned_total` 累计）。
+  与吃饭账同一纪律：只存日期与数字，不存任何正文。
 - `_SCHEMA_VERSION = 4`：新增**阶段性事件台账**（`event_history`：最近若干条
   `{key, stat, value, width, at}`）。与判断台账同一条隐私纪律——只存事件名与数值快照，
   不存任何对话正文。
@@ -163,6 +165,18 @@ class ShardState:
     # 补签周计数：ISO 周键（`2026-W37`）+ 本周已用次数（跨周读时归零，不需要常驻任务）。
     makeup_week: str = ""
     makeup_used: int = 0
+    # --- 打工台账（v0.7.0，schema 5）---
+    # 当前班次：`job_id` 非空 = 她在上班；`job_end_at` 到点后由 tick 结算，
+    # 进程重启/关机都不丢（与惰性衰减同一手法，没有常驻计时器）。
+    job_id: str = ""
+    job_start_at: float = 0.0
+    job_end_at: float = 0.0
+    # 每日班次上限的日账（入口可能先于 tick 被调用，自重置，同 judgment_day 手法）。
+    job_day: str = ""
+    job_count_today: int = 0
+    # 累计读数（商店解锁判据 + 面板"她挣过的钱"）。
+    job_shifts_total: int = 0
+    job_earned_total: int = 0
     updated_at: float = 0.0
     # 上一拍的档位快照（用于跨拍判跨档；不持久化）
     tier_snapshot: dict[str, str] = field(default_factory=dict)
@@ -355,6 +369,44 @@ class ShardState:
         used = self.makeup_used if self.makeup_week == week_key(today) else 0
         return max(0, int(week_limit) - used)
 
+    # ------------------------------------------------------------------
+    # 打工台账（v0.7.0）
+    # ------------------------------------------------------------------
+
+    @property
+    def working(self) -> bool:
+        return bool(self.job_id)
+
+    def reset_job_day(self, *, today: str) -> bool:
+        """跨天重置今日班次计数（幂等；入口与 tick 都会调，同 judgment 预算手法）。"""
+        if self.job_day == today:
+            return False
+        self.job_day = today
+        self.job_count_today = 0
+        return True
+
+    def shift_remaining(self, *, now: float) -> float:
+        """本班还要多久下班（秒）；没在上班返回 0。"""
+        if not self.job_id:
+            return 0.0
+        return max(0.0, self.job_end_at - float(now))
+
+    def begin_shift(self, *, job_id: str, now: float, hours: float) -> None:
+        self.job_id = job_id
+        self.job_start_at = float(now)
+        self.job_end_at = float(now) + max(0.0, float(hours)) * 3600.0
+        self.job_count_today += 1
+
+    def end_shift(self) -> None:
+        """清空当前班次（结算的记账字段由调用方在清零前读完）。"""
+        self.job_id = ""
+        self.job_start_at = 0.0
+        self.job_end_at = 0.0
+
+    def note_shift_settled(self, *, pay: int) -> None:
+        self.job_shifts_total += 1
+        self.job_earned_total += max(0, int(pay))
+
     def last_injected_stats(self) -> Stats | None:
         for entry in reversed(self.inject_history):
             raw = entry.get("stats")
@@ -408,6 +460,15 @@ class ShardState:
                 # 上限 CHECKIN_LOG_KEEP=120 条三元组，JSON 体积在几 KB 量级，不构成负担。
                 "log": [[day, coins, lucky] for day, coins, lucky in self.checkin_log],
                 "makeups": list(self.checkin_makeups),
+            },
+            "job": {
+                "id": self.job_id,
+                "start_at": self.job_start_at or None,
+                "end_at": self.job_end_at or None,
+                "remaining_sec": round(self.shift_remaining(now=now), 1),
+                "today_count": self.job_count_today if self.job_day == local_day(now) else 0,
+                "shifts_total": self.job_shifts_total,
+                "earned_total": self.job_earned_total,
             },
             "events": {
                 "history": [dict(item) for item in self.recent_events(limit=6)],
@@ -464,6 +525,13 @@ class ShardState:
             "checkin_best": self.checkin_best,
             "makeup_week": self.makeup_week,
             "makeup_used": self.makeup_used,
+            "job_id": self.job_id,
+            "job_start_at": self.job_start_at,
+            "job_end_at": self.job_end_at,
+            "job_day": self.job_day,
+            "job_count_today": self.job_count_today,
+            "job_shifts_total": self.job_shifts_total,
+            "job_earned_total": self.job_earned_total,
             "updated_at": self.updated_at,
         }
 
@@ -551,6 +619,13 @@ class ShardState:
             checkin_best=max(0, _as_int(payload.get("checkin_best"), 0)),
             makeup_week=_as_str(payload.get("makeup_week")),
             makeup_used=max(0, _as_int(payload.get("makeup_used"), 0)),
+            job_id=_as_str(payload.get("job_id")),
+            job_start_at=_as_float(payload.get("job_start_at"), 0.0),
+            job_end_at=_as_float(payload.get("job_end_at"), 0.0),
+            job_day=_as_str(payload.get("job_day")),
+            job_count_today=max(0, _as_int(payload.get("job_count_today"), 0)),
+            job_shifts_total=max(0, _as_int(payload.get("job_shifts_total"), 0)),
+            job_earned_total=max(0, _as_int(payload.get("job_earned_total"), 0)),
             updated_at=_as_float(payload.get("updated_at"), now),
         )
 

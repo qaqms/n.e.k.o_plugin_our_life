@@ -59,6 +59,7 @@ import { AxisCards } from "./components/axis_cards"
 import { Bag } from "./components/bag"
 import { CheckinCalendar } from "./components/calendar"
 import { DayBand } from "./components/day_band"
+import { JobBoard } from "./components/job_board"
 import { RhythmBar } from "./components/rhythm_bar"
 import { Timeline } from "./components/timeline"
 
@@ -108,6 +109,7 @@ export default function Panel(props: PanelProps) {
   const inventory = snapshot?.inventory ?? {}
   const catalog = state?.shop ?? []
   const checkinView = state?.checkin ?? {}
+  const jobView = state?.job ?? {}
   const axes = state?.axes ?? {}
   const sleeping = runtime.sleeping ?? snapshot?.sleeping ?? false
 
@@ -221,6 +223,24 @@ export default function Panel(props: PanelProps) {
     if (dismissResult(result)) return
     if (result?.note === "makeup_done") {
       toast.success(t("panel.msg.makeupDone", { streak: result.streak ?? 0 }))
+    }
+  }
+
+  // 打工（v0.7.0）：开工/收工都以后端返回的码为准；被拒（睡眠窗、额度、门槛）
+  // 时 `run` 已经把错误码 toast 出来了，这里不再叠一层。
+  const startShift = async (jobId: string) => {
+    const result = await run("job_start", { job: jobId })
+    if (dismissResult(result)) return
+    if (result?.note === "job_started") {
+      toast.success(t("panel.msg.jobStarted"))
+    }
+  }
+
+  const callBackHome = async () => {
+    const result = await run("job_return", {})
+    if (dismissResult(result)) return
+    if (result?.note === "job_returned") {
+      toast.success(t("panel.msg.jobReturned", { pay: result.pay ?? 0 }))
     }
   }
 
@@ -369,6 +389,7 @@ export default function Panel(props: PanelProps) {
         onCheckin={doCheckin}
         onMakeup={doMakeup}
       />
+      <JobBoard t={t} job={jobView} masterEnabled={enabled} onStart={startShift} onReturn={callBackHome} />
     </Stack>
   )
 

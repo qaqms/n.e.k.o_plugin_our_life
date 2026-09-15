@@ -120,6 +120,34 @@ export type ShopEntry = {
   effects?: [string, number][]
 }
 
+// 打工面板块：`snapshot.job` 读数 + `_job_context_view` 补的目录与旋钮。
+// 目录是静态真相（core/jobs.py 单一来源），计数是当次读数，两层在后端合流。
+export type JobCatalogEntry = {
+  id?: string
+  label_zh?: string
+  hours?: number
+  base_wage?: number
+  pay_low?: number
+  pay_high?: number
+  costs?: [string, number][]
+  requires?: [string, number][]
+}
+
+export type JobView = {
+  id?: string
+  start_at?: number | null
+  end_at?: number | null
+  remaining_sec?: number
+  today_count?: number
+  shifts_total?: number
+  earned_total?: number
+  enabled?: boolean
+  feature_enabled?: boolean
+  max_per_day?: number
+  early_leave_ratio?: number
+  catalog?: JobCatalogEntry[]
+}
+
 // 她经历过什么（v0.4.0 阶段性事件）。
 // 只带事件名 / 轴 / 时刻与数值快照——台账里本来就没有任何对话正文（见 core/events.py）。
 export type EventRecord = {
@@ -151,6 +179,7 @@ export type State = {
   state?: ShardSnapshot | null
   runtime?: RuntimeView
   checkin?: CheckinView
+  job?: JobView
   axes?: Record<string, AxisView>
   recent_injections?: InjectionRecord[]
   recent_events?: EventRecord[]

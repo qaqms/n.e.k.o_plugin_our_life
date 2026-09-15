@@ -43,6 +43,7 @@ __all__ = [
     "TRIGGER_HUNGRY",
     "TRIGGER_INTERVAL",
     "TRIGGER_JUDGMENT",
+    "TRIGGER_JOB",
     "TRIGGER_STAGED_EVENT",
     "TRIGGER_TIER_CHANGE",
     "TRIGGER_TIRED",
@@ -66,6 +67,10 @@ TRIGGER_JUDGMENT = "judgment"
 # 触发时它**优先于** tier_change——同一个跨越只该被讲成一件有名字的事，
 # 而不是既报"身体：生病 → 一般"又报"你终于好起来了"。
 TRIGGER_STAGED_EVENT = "staged_event"
+# 打工下班（v0.7.0）：班次在 tick 里到点结算后，"她回来了"这件事进她的上下文。
+# 与阶段事件同一手法：独立通道、只叙事不打断（永远 read）——钱已经挣回来了，
+# 这不是危机通知，不值得为它打断主人；但她得知道自己今天上过班、带回了多少钱。
+TRIGGER_JOB = "job_settled"
 
 # 阶段性事件的叙事模板（中文固定模板，与其它注入正文同一套口径：不给数字、不给档名）。
 # 每条都写成"第一人称的感受 + 行为倾向"，并明确要求她**不要**复述状态表。
@@ -244,6 +249,7 @@ def build_text(
     day_number: int = 0,
     judgment_label: str = "",
     staged_event: "StagedEvent | None" = None,
+    job_line: str = "",
 ) -> str:
     """装配注入正文。`transitions` 是 `core.model.tier_transitions` 的输出。
 
@@ -251,6 +257,8 @@ def build_text(
     她自己的判断以"一句感受"进上下文，**不带任何数字与档名**。
     `staged_event` 只在 `trigger=TRIGGER_STAGED_EVENT` 时有意义（v0.4.0 阶段性事件）：
     叙事读 `core/events` 的事件名，**同样不带数字与档名**——面板看得见数值，她不看。
+    `job_line` 只在 `trigger=TRIGGER_JOB` 时有意义（v0.7.0 打工）：带工钱数目——
+    金币不是五项状态那类"不该被念出来的读数"，而是她今天挣到的事实，她应该知道。
     """
     required: list[str] = [_HEADER]
 
@@ -285,6 +293,7 @@ def build_text(
         anniversary,
         judgment_label=judgment_label,
         staged_event=staged_event,
+        job_line=job_line,
     )
     if event_line:
         optional.append(f"　刚刚发生：{event_line}")
@@ -370,7 +379,11 @@ def _event_line(
     *,
     judgment_label: str = "",
     staged_event: "StagedEvent | None" = None,
+    job_line: str = "",
 ) -> str:
+    if trigger == TRIGGER_JOB:
+        # 打工下班：没有叙事行就不兑底成别的句子（与 staged_event 同一纪律）。
+        return job_line or "你打完工回到了家"
     if trigger == TRIGGER_STAGED_EVENT:
         # 阶段性事件：读事件名，不读数值。没有可讲的事件时**不兜底**成别的句子——
         # 这一档的存在意义就是"讲一件具体发生过的事"，讲不出来就不该走这条路

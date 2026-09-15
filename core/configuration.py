@@ -25,6 +25,7 @@ __all__ = [
     "FeedbackSettings",
     "GrowthSettings",
     "InjectSettings",
+    "JobSettings",
     "NeglectSettings",
     "OurLifeSettings",
     "RhythmSettings",
@@ -208,6 +209,38 @@ class CheckinSettings:
             makeup_cost=max(0, as_int(table.get("makeup_cost"), base.makeup_cost)),
             makeup_window_days=max(0, as_int(table.get("makeup_window_days"), base.makeup_window_days)),
             makeup_week_limit=max(0, as_int(table.get("makeup_week_limit"), base.makeup_week_limit)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class JobSettings:
+    """猫娘打工（v0.7.0）：只暴露行为旋钮。
+
+    工作目录（工时/工钱/损耗/门槛）固定在 `core/jobs.py` 作为单一来源，
+    与商品表 `core/economy.ITEMS` 同一纪律——它们是"她怎么过日子"的刻画。
+    """
+
+    enabled: bool = True
+    # 每日班次上限（代码天花板 `MAX_SHIFTS_PER_DAY` 会再夹一层）。
+    max_shifts_per_day: int = 2
+    # 早退折价：提前收工的工钱再乘这个比例（经兼现实：干一半的活拿不满的钱）。
+    early_leave_ratio: float = 0.6
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None) -> "JobSettings":
+        from .jobs import MAX_SHIFTS_PER_DAY
+
+        base = cls()
+        table = raw if isinstance(raw, Mapping) else {}
+        return cls(
+            enabled=as_bool(table.get("enabled"), base.enabled),
+            max_shifts_per_day=min(
+                MAX_SHIFTS_PER_DAY,
+                max(0, as_int(table.get("max_shifts_per_day"), base.max_shifts_per_day)),
+            ),
+            early_leave_ratio=max(
+                0.0, min(1.0, as_float(table.get("early_leave_ratio"), base.early_leave_ratio))
+            ),
         )
 
 
@@ -437,6 +470,7 @@ class OurLifeSettings:
     rhythm: RhythmSettings = field(default_factory=RhythmSettings)
     economy: EconomySettings = field(default_factory=EconomySettings)
     checkin: CheckinSettings = field(default_factory=CheckinSettings)
+    job: JobSettings = field(default_factory=JobSettings)
     growth: GrowthSettings = field(default_factory=GrowthSettings)
     feedback: FeedbackSettings = field(default_factory=FeedbackSettings)
     events: EventSettings = field(default_factory=EventSettings)
@@ -455,6 +489,7 @@ class OurLifeSettings:
             rhythm=RhythmSettings.from_mapping(section(config, "our_life", "rhythm")),
             economy=EconomySettings.from_mapping(section(config, "our_life", "economy")),
             checkin=CheckinSettings.from_mapping(section(config, "our_life", "checkin")),
+            job=JobSettings.from_mapping(section(config, "our_life", "job")),
             growth=GrowthSettings.from_mapping(section(config, "our_life", "growth")),
             feedback=FeedbackSettings.from_mapping(section(config, "our_life", "feedback")),
             events=EventSettings.from_mapping(section(config, "our_life", "events")),

@@ -140,6 +140,17 @@ makeup_cost = 12
 makeup_window_days = 7
 makeup_week_limit = 1
 
+
+[our_life.job]
+# 猫娘打工（v0.7.0）：她出门上班拿真实时间换金币，班次期间自然衰减照常，
+# 结算时再扣"劳动的额外磨损"，工钱按她下班那一刻的身心状态打 0.8~1.1 折。
+# 工作目录（工时/工钱/损耗/门槛）固定在 core/jobs.py，与商品表同一纪律，不进配置。
+enabled = true
+# 每日班次上限（代码天花板 3，配置调不过去）。
+max_shifts_per_day = 2
+# 早退折价：提前喊她回来，工钱按"已完成时长比例 × 这个折扣"结算。
+early_leave_ratio = 0.6
+
 [our_life.growth]
 # 每次用户发言：心情 +2.5 / 健康 +0.8 / 好感 +0.35。
 # 同一会话内第 n 次发言按 1/(1+n*session_diminish) 递减，避免"连发刷数值"。

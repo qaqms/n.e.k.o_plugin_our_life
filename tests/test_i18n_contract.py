@@ -25,11 +25,13 @@ from our_life.core.injection import (
     TRIGGER_DAILY_GREET,
     TRIGGER_HUNGRY,
     TRIGGER_INTERVAL,
+    TRIGGER_JOB,
     TRIGGER_JUDGMENT,
     TRIGGER_STAGED_EVENT,
     TRIGGER_TIER_CHANGE,
     TRIGGER_TIRED,
 )
+from our_life.core.jobs import JOB_IDS
 from our_life.core.model import (
     AFFECTION_TIERS,
     ENERGY_TIERS,
@@ -53,6 +55,8 @@ SUCCESS_NOTES = (
     "care_applied",
     "coin_updated",
     "checkin_done",
+    "job_started",
+    "job_returned",
     "makeup_done",
     "focus_set",
     "focus_cleared",
@@ -201,12 +205,28 @@ def test_trigger_keys_exist_for_every_trigger() -> None:
         TRIGGER_ANNIVERSARY,
         TRIGGER_JUDGMENT,
         TRIGGER_STAGED_EVENT,
+        TRIGGER_JOB,
     )
     for locale in LOCALES:
         messages = _load(locale)
         for trigger in triggers:
             key = f"panel.trigger.{trigger}"
             assert key in messages, f"{locale} is missing {key}"
+
+
+def test_job_names_exist_for_every_job() -> None:
+    """工作名必须两语齐全（v0.7.0 打工）。
+
+    面板按 `panel.job.<id>` 动态拼键渲染目录，拼接键不在引用面门覆盖面内——
+    少一个键只会显示成空白。与事件族同一理由，逐项钉住。
+    """
+    assert JOB_IDS, "there must be at least one job"
+    for locale in LOCALES:
+        messages = _load(locale)
+        for job_id in JOB_IDS:
+            key = f"panel.job.{job_id}"
+            assert key in messages, f"{locale} is missing {key}"
+            assert messages[key].strip(), f"{locale}:{key} is empty"
 
 
 def test_event_keys_exist_for_every_staged_event() -> None:
