@@ -62,6 +62,7 @@ import { DayBand } from "./components/day_band"
 import { JobBoard } from "./components/job_board"
 import { Minigames } from "./components/minigame"
 import { RhythmBar } from "./components/rhythm_bar"
+import { StatePage } from "./components/state_page"
 import { Timeline } from "./components/timeline"
 
 // 禁用态光标覆盖（v0.4.5）+ 作息条格样式（v0.6.0）：kit 的 `.neko-button:disabled` 是
@@ -623,6 +624,16 @@ export default function Panel(props: PanelProps) {
     </Stack>
   )
 
+  // 「她此刻的状态」（v0.8.0）：整页只读 context 的 state_note——后端没给身体明细
+  // （无分片 / 旧 context）时递 EmptyState，而不是摆六张空卡当“她一切正常”。
+  const stateNote = state?.state_note ?? null
+  const stateTab =
+    stateNote && (stateNote.body ?? []).length > 0 ? (
+      <StatePage t={t} note={stateNote} sparks={sparks} anniversary={runtime.anniversary ?? null} />
+    ) : (
+      <EmptyState title={t("panel.noShard")} description={t("panel.noShardHint")} />
+    )
+
   const adminTab = (
     <Stack gap={16}>
       <Card title={t("panel.section.tune")}>
@@ -710,6 +721,10 @@ export default function Panel(props: PanelProps) {
     { id: "board", label: t("panel.tab.board"), content: boardTab },
     { id: "life", label: t("panel.tab.life"), content: lifeTab },
     { id: "her", label: t("panel.tab.her"), content: herTab },
+    // 「她此刻的状态」（v0.8.0）：读 context 的 state_note（判据全在 core/state_note.py）。
+    // 放在「她的世界」之后、「管理」之前：前三页是"你要做的事"，这一页是"她怎么样"，
+    // 管理页永远垫底。
+    { id: "state", label: t("panel.tab.state"), content: stateTab },
     { id: "admin", label: t("panel.tab.admin"), content: adminTab },
   ]
 

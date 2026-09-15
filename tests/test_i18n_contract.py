@@ -33,6 +33,7 @@ from our_life.core.injection import (
     TRIGGER_TIRED,
 )
 from our_life.core.jobs import JOB_IDS
+from our_life.core.judgment import JUDGMENT_LABELS
 from our_life.core.model import (
     AFFECTION_TIERS,
     ENERGY_TIERS,
@@ -42,6 +43,7 @@ from our_life.core.model import (
     STAT_NAMES,
 )
 from our_life.core.shop import RARITIES
+from our_life.core.state_note import COUPLING_CODES
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCALES = ("zh-CN", "en")
@@ -265,5 +267,83 @@ def test_event_keys_exist_for_every_staged_event() -> None:
         messages = _load(locale)
         for event in EVENT_KEYS:
             key = f"panel.event.{event}"
+            assert key in messages, f"{locale} is missing {key}"
+            assert messages[key].strip(), f"{locale}:{key} is empty"
+
+
+# ---------------------------------------------------------------------------
+# 6.5 v0.8.0「她此刻的状态」页新增的拼接族
+# ---------------------------------------------------------------------------
+
+# 轴 -> 五档。引用 `core.model` 的档位表而不是重抄一份：改表时这里自动跟着走。
+_VOICE_FAMILIES: dict[str, tuple[str, ...]] = {
+    "affection": AFFECTION_TIERS,
+    "mood": MOOD_TIERS,
+    "health": HEALTH_TIERS,
+    "satiety": SATIETY_TIERS,
+    "energy": ENERGY_TIERS,
+}
+
+
+def test_state_voice_keys_exist_for_every_stat_and_tier() -> None:
+    """她的自述整句：五轴 × 五档全齐，且**不能有多余键**（v0.8.0）。
+
+    面板按 `panel.stateVoice.<轴>.<档>` **动态拼键**输出她说的话——键名由
+    `core/state_note.voice_keys` 选，前端只负责 `t(key)`。拼接键不在引用面门
+    （`t("字面量")` 正则）的射程里，所以少一句不会让任何门变红，只会在面板上
+    显示成一个空引号——那比不显示更界。双向钉：拼错的档名（如 `satiety.huger`）
+    永远取不到，作为孤儿抓出来。
+    """
+    assert set(_VOICE_FAMILIES) == set(STAT_NAMES)
+    expected = {f"panel.stateVoice.{stat}.{tier}" for stat, tiers in _VOICE_FAMILIES.items() for tier in tiers}
+    assert len(expected) == 25, "five axes x five tiers"
+    for locale in LOCALES:
+        messages = _load(locale)
+        for key in sorted(expected):
+            assert key in messages, f"{locale} is missing {key}"
+            assert messages[key].strip(), f"{locale}:{key} is empty"
+        orphans = {key for key in messages if key.startswith("panel.stateVoice.")} - expected
+        assert not orphans, f"{locale} has voice keys that no stat/tier can reach: {sorted(orphans)}"
+
+
+def test_state_coupling_keys_exist_for_every_code() -> None:
+    """跨轴拖累的四个码必须两语齐全（v0.8.0）。
+
+    码集单一来源是 `core/state_note.COUPLING_CODES`；面板拿 `coupling_codes()` 的输出
+    `camel` 后查 `panel.stateCoupling.<驼峰码>`——同样不在引用面门的射程里。
+    新加一档耦合而忘写文案，这里必红（与 `panel.errors.<码>` 同步门同一手法）。
+    """
+    expected = {f"panel.stateCoupling.{camel_case(code)}" for code in COUPLING_CODES}
+    assert len(expected) == len(COUPLING_CODES), "camelCase 后不能撞键"
+    for locale in LOCALES:
+        messages = _load(locale)
+        for key in sorted(expected):
+            assert key in messages, f"{locale} is missing {key}"
+            assert messages[key].strip(), f"{locale}:{key} is empty"
+        orphans = {key for key in messages if key.startswith("panel.stateCoupling.")} - expected
+        assert not orphans, f"{locale} has coupling keys no code can reach: {sorted(orphans)}"
+
+
+def test_judgment_label_keys_exist_for_every_label() -> None:
+    """她的判断标签两语齐全（v0.8.0 起有**两个**拼键消费者）。
+
+    `panel.judgment.<label>` 以前只被「她的世界」的表格拼一次，现在状态页的徽章也拼它。
+    拼接族一旦有了第二个消费者就更要钉住：标签集来自 `core/judgment.JUDGMENT_LABELS`，
+    工具入参的 enum 也从这里取，所以上了标签却没上文案会在两处同时变成空白。
+    """
+    for locale in LOCALES:
+        messages = _load(locale)
+        for label in JUDGMENT_LABELS:
+            key = f"panel.judgment.{label}"
+            assert key in messages, f"{locale} is missing {key}"
+            assert messages[key].strip(), f"{locale}:{key} is empty"
+
+
+def test_stat_label_keys_exist_for_every_axis() -> None:
+    """轴名两语齐全：`panel.stat.<轴>` 也是拼键族（状态页行首与纠偏下拉都用它）。"""
+    for locale in LOCALES:
+        messages = _load(locale)
+        for stat in STAT_NAMES:
+            key = f"panel.stat.{stat}"
             assert key in messages, f"{locale} is missing {key}"
             assert messages[key].strip(), f"{locale}:{key} is empty"

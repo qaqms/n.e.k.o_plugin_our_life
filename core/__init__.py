@@ -227,6 +227,7 @@ from .shop import (
     unit_cost,
     visible_ids,
 )
+from .state_note import COUPLING_CODES, build_state_note, coupling_codes, voice_keys
 
 __all__ = [
     "AFFECTION_TIERS",
@@ -236,6 +237,7 @@ __all__ = [
     "Anniversary",
     "BehaviorSummary",
     "CHECKIN_LOG_KEEP",
+    "COUPLING_CODES",
     "COUPLING_THRESHOLDS",
     "CheckinOutcome",
     "CheckinSettings",
@@ -344,6 +346,7 @@ __all__ = [
     "apply_turn_gain",
     "axis_details",
     "build_challenge",
+    "build_state_note",
     "build_text",
     "bump_meal_day",
     "camel_case",
@@ -352,6 +355,7 @@ __all__ = [
     "clamp_value",
     "condition_met",
     "consume_challenge",
+    "coupling_codes",
     "coupling_signal",
     "crisis_axes",
     "crosses_tier_boundary",
@@ -427,6 +431,7 @@ __all__ = [
     "tier_transitions",
     "unit_cost",
     "visible_ids",
+    "voice_keys",
     "wage_factor",
     "wage_preview",
     "week_key",

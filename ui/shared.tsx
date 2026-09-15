@@ -97,6 +97,14 @@ export type FeedbackView = {
   history?: JudgmentRecord[]
 }
 
+// 纪念日（core/rhythm.Anniversary.as_dict 的形状）：kind = milestone / yearly。
+export type AnniversaryView = {
+  kind?: string
+  day_number?: number
+  repeats_annually?: boolean
+  years?: number
+}
+
 export type RuntimeView = {
   rhythm?: Record<string, any>
   phase?: string
@@ -107,7 +115,7 @@ export type RuntimeView = {
   crisis?: boolean
   crisis_axes?: string[]
   day_number?: number
-  anniversary?: { kind?: string; day_number?: number; years?: number } | null
+  anniversary?: AnniversaryView | null
   feedback?: FeedbackView
 }
 
@@ -219,12 +227,66 @@ export type State = {
   job?: JobView
   games?: GamesView
   axes?: Record<string, AxisView>
+  /** 「她此刻的状态」页（v0.8.0）：判据在 `core/state_note.py`，这里只接结果。 */
+  state_note?: StateNote
   recent_injections?: InjectionRecord[]
   recent_events?: EventRecord[]
   trend?: InjectionRecord[]
   hours?: number[]
   meal_days?: [string, number][]
   error_code?: string
+}
+
+// 「她此刻的状态」页的数据面（v0.8.0）。字段与 `core/state_note.build_state_note` 一一对应：
+// **后端只出判据与键名/ASCII 码，文案全在 i18n**。`voice` 是整句键（不逐词拼），
+// `coupling` 是 `camel` 后查 `panel.stateCoupling.<码>` 的稳定码。
+// 所有字段可选：旧 context / 无分片时组件自己降级，不因为一处缺数据就整页报错。
+export type StateNoteBodyRow = {
+  stat?: string
+  tier?: string
+  tier_index?: number
+  value?: number
+  next_tier?: string | null
+  to_next?: number | null
+  delta_today?: number | null
+}
+
+export type StateNote = {
+  voice?: string[]
+  voice_count?: number
+  voice_reason?: string
+  body?: StateNoteBodyRow[]
+  coupling?: string[]
+  rhythm?: {
+    phase?: string | null
+    sleeping?: boolean | null
+    hour?: number | null
+    minute?: number | null
+    hours_to_sleep?: number | null
+    hours_to_wake?: number | null
+  }
+  us?: {
+    day_number?: number | null
+    streak_days?: number | null
+    gap_hours?: number | null
+    anniversary_kind?: string | null
+  }
+  mind?: {
+    has_judgment?: boolean
+    label?: string | null
+    applied?: number | null
+    count_today?: number | null
+    at?: number | null
+  }
+  today?: {
+    meals_today?: number | null
+    checked_today?: boolean
+    job_id?: string | null
+    job_remaining_sec?: number | null
+    game_active?: boolean
+    sodas?: number | null
+    spoke_today?: number | null
+  }
 }
 
 export type PanelProps = PluginSurfaceProps<State>

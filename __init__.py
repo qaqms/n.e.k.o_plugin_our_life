@@ -67,11 +67,13 @@ from .core import (
     apply_turn_gain,
     axis_details,
     build_challenge,
+    build_state_note,
     build_text,
     bump_meal_day,
     challenge_public_view,
     clamp_value,
     consume_challenge,
+    coupling_signal,
     crisis_axes,
     daily_block_reason,
     daily_deals,
@@ -1822,16 +1824,43 @@ class OurLifePlugin(NekoPluginBase):
             payload["error_code"] = "invalid_lanlan"
             # 今日货架随分片走：没有分片就没有"她的经历"，货架空而不是泄底全表。
             payload["shop"] = []
+            # 无分片就没有"她的状态"：空档案而不是空页（面板据此走 EmptyState）。
+            payload["state_note"] = build_state_note(axes={})
             return payload
         state = await self._touch_shard(lanlan, now=now)
-        payload["state"] = state.snapshot_for_panel(now=now)
+        snapshot = state.snapshot_for_panel(now=now)
+        payload["state"] = snapshot
         # 今日货架（v0.7.0）：可见性过滤 + 特惠价都在后端复算，必须拿到分片后才算。
         payload["shop"] = self._shop_view(state, now=now)
         payload["checkin"] = self._checkin_context_view(state, now=now)
         payload["job"] = self._job_context_view(state, now=now)
         payload["games"] = self._games_context_view(state, now=now)
         payload["runtime"] = await self._runtime_view(state, now=now)
-        payload["axes"] = _axis_view(state, now=now)
+        axes = _axis_view(state, now=now)
+        payload["axes"] = axes
+        # 「她此刻的状态」页（v0.8.0）：判据全在 `core/state_note.py`，这里只把**已经算好的
+        # 原料**递进去（不重算档位、不重算危机、不读第二遍 store），输出的是 i18n 键 + ASCII 码。
+        # 为什么不在前端算："她该先说哪一句"是判据，放进 TSX 就会出现"面板上说的
+        # 与她注入时说的不是一回事"，而且这一层没有任何测试门能管住它。
+        runtime = payload["runtime"]
+        payload["state_note"] = build_state_note(
+            axes=axes,
+            rhythm=self._rhythm(now=now),
+            coupling=coupling_signal(state.stats),
+            crisis=bool(runtime.get("crisis")),
+            crisis_axes=runtime.get("crisis_axes") or (),
+            day_number=runtime.get("day_number"),
+            streak_days=state.streak_days,
+            gap_hours=snapshot.get("gap_hours"),
+            anniversary=runtime.get("anniversary"),
+            judgment=snapshot.get("judgment"),
+            meals_today=snapshot.get("meals_today"),
+            checked_today=(snapshot.get("checkin") or {}).get("checked_today"),
+            job=payload["job"],
+            games=payload["games"],
+            sodas=snapshot.get("sodas"),
+            spoke_today=snapshot.get("inject_count_24h"),
+        )
         payload["recent_injections"] = [dict(item) for item in state.inject_history[-8:]]
         # 她经历过的事（v0.4.0）：面板用它列"经历"。`snapshot_for_panel` 里也有一份
         # （上限 6 条、新的在前），这里再取一次是为了让面板拿到**比注入历史更长**的窗口——
